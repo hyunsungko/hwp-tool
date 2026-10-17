@@ -1,0 +1,13 @@
+{
+  "name": "hwp-tool",
+  "version": "0.1.0",
+  "description": "Read, edit, create and convert Korean HWP/HWPX documents from Claude: Markdown to report-style HWP, character and paragraph formatting, tables, headers, page numbers, footnotes, fields, merges, and exam-sheet layout. Works without Hancom Office for HWPX; when Hancom is installed it runs on a hidden desktop with no window on screen.",
+  "author": {
+    "name": "hyunsungko",
+    "url": "https://github.com/hyunsungko"
+  },
+  "homepage": "https://github.com/hyunsungko/hwp-tool",
+  "repository": "https://github.com/hyunsungko/hwp-tool",
+  "license": "MIT",
+  "keywords": ["hwp", "hwpx", "hancom", "korean", "document", "owpml", "report", "windows", "linux", "macos"]
+}

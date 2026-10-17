@@ -1,0 +1,18 @@
+{
+  "name": "hwp-tool",
+  "owner": {
+    "name": "hyunsungko",
+    "url": "https://github.com/hyunsungko"
+  },
+  "metadata": {
+    "description": "hwp-tool: read, edit and create Korean HWP/HWPX documents."
+  },
+  "plugins": [
+    {
+      "name": "hwp-tool",
+      "source": "./",
+      "description": "Korean HWP/HWPX documents: Markdown to report, edit formatting and tables, convert HWP and HWPX, with or without Hancom Office.",
+      "category": "productivity"
+    }
+  ]
+}

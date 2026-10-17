@@ -1,0 +1,49 @@
+name: test
+
+# Fresh runners with no Hancom Office: install the Python packages and run the tests.
+# HWPX editing, Markdown -> HWPX, HWP reading and HWP -> HWPX run everywhere.
+# HWP writing (HWPX -> HWP) runs on Windows only (pywin32 structured storage).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: install
+        run: python -m pip install -r requirements.txt
+      - name: tests
+        run: python -m unittest discover -s tests -v
+        env:
+          PYTHONIOENCODING: utf-8
+      - name: Markdown to HWPX (and HWP on Windows)
+        shell: bash
+        run: |
+          mkdir -p _out
+          python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_report.md -o _out/report.hwpx --engine direct
+          python skills/hwp-tool/scripts/hwp_tool.py read _out/report.hwpx | head -20
+          python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_paper.md -o _out/paper.hwpx --engine direct --style paper
+          python skills/hwp-tool/scripts/hwp_tool.py read _out/paper.hwpx | head -10
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_report.md -o _out/report.hwp --engine direct
+            python skills/hwp-tool/scripts/hwp_tool.py read _out/report.hwp | head -5
+          fi
+        env:
+          PYTHONIOENCODING: utf-8
+      - name: speed on the runner (numbers only)
+        if: matrix.python == '3.13'
+        run: python tests/bench.py
+        env:
+          PYTHONIOENCODING: utf-8
