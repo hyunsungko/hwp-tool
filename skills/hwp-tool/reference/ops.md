@@ -35,7 +35,7 @@
 | `table.border` | `table`, `cells`, `line`(solid·dash·dot·double·none) `width`("0.4mm") `color` `sides`(all·outside·inside·left,top…) | 칸 테두리 |
 | `table.align` | `table`, `cells`, `h`(left·center·right) `v`(top·middle·bottom) | 칸 정렬 |
 | `table.cell_text` | `table`, `cell`, `text` | 칸 글 바꾸기 |
-| `image` | 자리, `path`, `width_mm`/`height_mm`(하나만 주면 비율 유지) | 그림 넣기 |
+| `image` | 자리, `path`, `width_mm`/`height_mm`(하나만 주면 비율 유지), `float`("front"·"behind"), `over`(이 글 위에 겹침, `nth`), `dx_mm`·`dy_mm` | 그림 넣기. 도장·서명: `{"op":"image","path":"도장.png","width_mm":15,"over":"인)"}`(위치는 어림이라 쪽 그림으로 확인) |
 | `header` / `footer` | `text`, `page`(both·odd·even), `align` | 머리말·꼬리말(있으면 글을 바꿈) |
 | `page_number` | `pos`(bottom-center 등 11가지), `format`(digit·circle·roman·roman-small·latin·latin-small·hangul·hanja), `side`("-") | 쪽 번호 |
 | `page_hide` | 자리(기본 첫 쪽), `header` `footer` `page_number` `master` `border` `fill` | 그 쪽 감추기(표지) |

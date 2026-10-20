@@ -2,3 +2,5 @@ lxml>=4.9
 olefile>=0.46
 pillow>=9
 pywin32>=305; sys_platform == "win32"
+pdfplumber>=0.10; sys_platform == "win32"
+pymupdf>=1.23; sys_platform == "win32"

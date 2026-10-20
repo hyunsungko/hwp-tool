@@ -2,11 +2,12 @@
 
   python hwp_tool.py write 보고서.md -o 보고서.hwp --engine direct [--header 머리말]
 
-글꼴: 제목 HY헤드라인M · 본문 휴먼명조 · 표 맑은 고딕.
+글꼴: 제목 HY헤드라인M · 보고서 본문·표 맑은 고딕(왼쪽 정렬) · 논문 본문 휴먼명조.
 - `# 제목` → 표지 제목 상자(위·아래 굵은 선), 바로 아래 짧은 문단은 부제
-- `## 1. 장 제목` → 번호 띠(남색 번호 칸 + 밑줄 친 제목 칸)
+- `## 1. 장 제목` → 번호 띠(남색 번호 칸 + 밑줄 친 제목 칸), 다음 내용과 같은 쪽에
 - `### 소제목` → □ 소제목,  `- 항목` → ○ 항목(내어쓰기),  `1. 항목` → 번호 그대로
-- 표 → 좌우 바깥 테두리 없음, 위·아래 굵은 남색 선, 머리줄 음영, 첫 칸 굵게
+- 표 → 좌우 바깥 테두리 없음, 위·아래 굵은 남색 선, 머리줄 음영·굵게·가운데, 첫 칸 굵게·옅은 음영(같은 값은 세로 합침),
+  숫자 열 오른쪽, 합계·소계 줄 굵게·음영. 2열 표의 '항목|내용' 머리줄은 빼고 왼쪽 칸을 이름표로. 낮은 표는 쪽에서 안 나눔
 - `> 인용` → 강조 상자(옅은 바탕 + 왼쪽 굵은 선)
 - `![캡션](그림.png)` → 그림(폭 150mm) + <그림 n> 캡션
 - ```kpi 블록(줄마다 `값 | 이름 | 설명`) → 「핵심 지표」 상자: 바깥 표 안에 지표 표(표 안에 표)
@@ -17,16 +18,23 @@ import re
 import hwpx_direct as X
 
 NAVY, ACCENT, GRAY, LIGHT = "#1F3864", "#C55A11", "#8C96A8", "#DCE6F2"
+LABEL, TOTAL = "#F2F5FA", "#EEF2F8"          # 이름표 칸(2열 표 왼쪽)·합계 줄 바탕
 HEAD, BODYF, TABLEF = "HY헤드라인M", "휴먼명조", "맑은 고딕"
-BODY = {"font": BODYF, "size": 12, "align": "justify", "line_spacing": 160, "after_pt": 4, "word_wrap": "word"}
+REPORTF = "맑은 고딕"                        # 보고서 본문(2026-10-21: 명조 양쪽 정렬은 어절 줄 나눔에서 띄어쓰기가 벌어졌다)
+# 보고서 본문은 왼쪽 정렬: 어절 단위 줄 나눔(기본)과 양쪽 정렬을 함께 쓰면 긴 어절(주소 등) 앞 줄의 띄어쓰기가 크게 벌어진다
+BODY = {"font": REPORTF, "size": 11, "align": "left", "line_spacing": 170, "after_pt": 5, "word_wrap": "word"}
 STYLE = {
     "subtitle": {"font": TABLEF, "size": 11, "align": "right", "after_pt": 16, "color": "#595959"},
-    3: {"font": BODYF, "size": 13, "bold": True, "before_pt": 10, "after_pt": 4, "keep_with_next": True, "word_wrap": "word"},
-    4: {"font": BODYF, "size": 12, "bold": True, "before_pt": 6, "after_pt": 3, "keep_with_next": True, "word_wrap": "word"},
-    "bullet": {**BODY, "left_mm": 6, "indent_mm": -4},
-    "number": {**BODY, "left_mm": 6, "indent_mm": -5},
+    3: {"font": REPORTF, "size": 12, "bold": True, "color": NAVY, "before_pt": 10, "after_pt": 4, "keep_with_next": True,
+        "word_wrap": "word"},
+    4: {"font": REPORTF, "size": 11, "bold": True, "before_pt": 6, "after_pt": 3, "keep_with_next": True, "word_wrap": "word"},
+    "bullet": {**BODY, "left_mm": 6, "indent_mm": -4, "after_pt": 3},
+    "number": {**BODY, "left_mm": 6, "indent_mm": -5, "after_pt": 3},
     "caption": {"font": TABLEF, "size": 10, "align": "center", "after_pt": 10, "color": "#404040"},
 }
+GENERIC_HEAD = {"항목", "구분", "내용", "값", "설명", "비고", ""}     # 2열 표에서 이것뿐인 머리줄은 빼고 왼쪽 칸을 이름표로
+TOTAL_WORDS = {"합계", "소계", "계", "총계", "총합", "합"}
+NUMBER = re.compile(r"^[-+±△▲▽]?\s*[\d,]+(\.\d+)?\s*(원|천원|백만원|억원|%|명|개|건|회|시간|일|개월|년)?$")
 INLINE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__|`([^`]+)`|\[([^\]]+)\]\([^)]+\)|(?<![\w*])\*([^*\s][^*]*?)\*(?![\w*])")
 NONE = {"line": "none", "sides": "all"}
 
@@ -111,14 +119,20 @@ def blocks(md):
     return out
 
 
-def col_widths(rows, total_mm):
-    """칸 너비: 칸마다 글 길이에 비례(최소 16mm)."""
+def col_widths(rows, total_mm, label=False):
+    """칸 너비: 칸마다 글 길이에 비례(최소 16mm). label=True면 rows에 머리줄이 없고 첫 칸이 이름표다."""
     n = len(rows[0])
+    body = rows if label else rows[1:]
     need = [max(min(len(r[c]), 60) for r in rows) + 3 for c in range(n)]
     # 칸 최소 너비: 본문 줄(머리 줄 빼고)의 가장 긴 어절이 한 줄에 들어가게(9.5pt 한글 약 3.6mm·영숫자 약 2mm + 칸 여백 5mm, 40mm까지)
     def word_mm(wd):
         return sum(3.6 if ord(ch) > 0x2E80 else 2.0 for ch in wd)
-    low = [min(40.0, max(16.0, max((word_mm(wd) for r in rows[1:] for wd in r[c].split()), default=0) + 5)) for c in range(n)]
+    low = [min(40.0, max(16.0, max((word_mm(wd) for r in body for wd in r[c].split()), default=0) + 5)) for c in range(n)]
+    # 첫 칸(분류·이름표)이 짧은 글(14자 이하)뿐이면 가장 긴 글이 통째로 한 줄에 들어가게('정보제공 수단'이 두 줄로
+    # 꺾이던 것 — 2026-10-21). 2·3열 표는 넓이의 40%, 그보다 많은 열은 25%까지(다른 칸을 너무 좁히지 않게)
+    if all(len(r[0]) <= 14 for r in rows):
+        cap = total_mm * (0.4 if n <= 3 else 0.25)
+        low[0] = max(low[0], min(cap, max(word_mm(r[0]) + 1.0 * r[0].count(" ") for r in rows) + 6))
     w = [max(low[c], total_mm * need[c] / sum(need)) for c in range(n)]
     over = sum(w) - total_mm                 # 넘친 만큼은 최소보다 넓은 칸에서 덜어 낸다
     room = [w[c] - low[c] for c in range(n)]
@@ -126,6 +140,21 @@ def col_widths(rows, total_mm):
         w = [w[c] - over * room[c] / sum(room) for c in range(n)]
     k = total_mm / sum(w)
     return [round(x * k, 1) for x in w]
+
+
+def table_height_mm(rows, widths, size_pt=10, pad_pt=3):
+    """표 높이 어림(mm): 줄마다 가장 많이 꺾이는 칸의 줄 수 × 줄 높이 + 칸 위아래 여백."""
+    line = size_pt * 0.3528 * 1.3
+    pad = 2 * pad_pt * 0.3528 + 1.0
+    total = 0.0
+    for r in rows:
+        n = 1
+        for c, text in enumerate(r):
+            room = max(5.0, widths[c] - 3.6)
+            mm_ = sum((size_pt / 9.5) * (3.6 if ord(ch) > 0x2E80 else 2.0) for ch in text)
+            n = max(n, -(-mm_ // room) if mm_ else 1)
+        total += n * line + pad
+    return total
 
 
 def cell(c, r):
@@ -166,7 +195,7 @@ class Ops:
         m = re.match(r"^(\d+)[.)]?\s*(.*)$", text)
         num, name = (m.group(1), m.group(2)) if m else ("■", text)
         t = self.table([[num, plain(name)]], [12, self.w - 12], font=HEAD, size=14, color=NAVY, pad_pt=3,
-                       table_align="left", keep_with_next=True, page_break=self.page_break)
+                       table_align="left", keep_with_next="chain", page_break=self.page_break)
         self.add({"op": "table.border", "table": t, "cells": "A1:B1", **NONE},
                  {"op": "table.fill", "table": t, "cells": "A1", "color": NAVY},
                  {"op": "char", "table": t, "cells": "A1", "color": "#FFFFFF"},
@@ -175,31 +204,59 @@ class Ops:
                  {"op": "table.border", "table": t, "cells": "B1", "line": "solid", "width": "0.5mm", "color": NAVY, "sides": "bottom"})
 
     def data_table(self, rows):
+        """자료 표. 머리줄(음영·굵게·가운데·남색), 첫 칸(분류) 굵게·옅은 음영·같은 값은 세로로 합침, 숫자 열 오른쪽,
+        합계·소계 줄 굵게·음영. 2열 표의 머리줄이 '항목|내용'처럼 이름뿐이면 빼고 왼쪽 칸을 이름표로 쓴다."""
         data = [[plain(c) for c in r] for r in rows]
+        head = not (len(data[0]) == 2 and len(data) >= 3 and all(c.strip() in GENERIC_HEAD for c in data[0]))
+        if not head:
+            data = data[1:]
         nr, nc = len(data), len(data[0])
-        last = cell(nc - 1, nr - 1)
-        t = self.table(data, col_widths(data, self.w), font=TABLEF, size=9.5, header=True, header_fill=LIGHT,
-                       align="left", word_wrap="word", pad_pt=2.5, table_align="center", inline=False)
-        r = 1                                    # 첫 칸이 빈 줄은 위 분류 칸과 세로로 합친다(원문의 세로 합친 칸)
+        top = 1 if head else 0                   # 본문 첫 줄(0부터)
+        # 첫 칸이 비었거나 위와 같은 값인 줄은 위 분류 칸과 세로로 합친다. 합치면 칸 글이 이어 붙으므로 미리 비운다
+        groups, r = [], top
         while r < nr:
             k = r + 1
-            while k < nr and not data[k][0].strip():
+            while k < nr and (not data[k][0].strip() or data[k][0].strip() == data[r][0].strip()):
                 k += 1
             if data[r][0].strip() and k - 1 > r:
-                self.add({"op": "table.merge", "table": t, "cells": f"A{r + 1}:A{k}"},
-                         {"op": "table.align", "table": t, "cells": f"A{r + 1}", "h": "center", "v": "middle"})
+                groups.append((r, k - 1))
+                for j in range(r + 1, k):
+                    data[j][0] = ""
             r = k
+        totals = [r for r in range(top, nr) if any(c.replace(" ", "") in TOTAL_WORDS for c in data[r][:2])]
+        nums = [c for c in range(1, nc) if any(data[r][c].strip() for r in range(top, nr))
+                and all(NUMBER.match(data[r][c].strip()) for r in range(top, nr) if data[r][c].strip())]
+        widths = col_widths(data, self.w, label=not head)
+        last = cell(nc - 1, nr - 1)
+        # 낮은 표(본문 높이의 1/3 이하로 어림)는 글자처럼 취급해 쪽에서 나누지 않고 제목·문단과 함께 통째로 옮긴다(수지예산
+        # 10줄이 수입·지출로 갈라졌다). 높은 표는 자리 차지로 두어 줄 단위로 나눈다(통째로 넘기면 앞 쪽 아래 절반이 빈다).
+        # 자리 차지 표를 나누지 않게만 하면 표만 다음 쪽으로 가고 제목·뒤 문단은 앞 쪽에 남는다 — 2026-10-21
+        t = self.table(data, widths, font=TABLEF, size=10, header=head, header_fill=LIGHT,
+                       align="left", word_wrap="word", pad_pt=3, table_align="center",
+                       inline=table_height_mm(data, widths) <= 80)
+        for r1, r2 in groups:
+            self.add({"op": "table.merge", "table": t, "cells": f"A{r1 + 1}:A{r2 + 1}"})
         self.add({"op": "table.border", "table": t, "cells": f"A1:{last}", "line": "solid", "width": "0.12mm", "color": GRAY, "sides": "all"},
                  {"op": "table.border", "table": t, "cells": f"A1:{last}", "line": "solid", "width": "0.5mm", "color": NAVY, "sides": "top,bottom"},
-                 {"op": "table.border", "table": t, "cells": f"A1:{last}", "line": "none", "sides": "left,right"},
-                 {"op": "table.border", "table": t, "cells": f"A1:{cell(nc - 1, 0)}", "line": "solid", "width": "0.3mm", "color": NAVY, "sides": "bottom"},
-                 {"op": "char", "table": t, "cells": f"A1:{cell(nc - 1, 0)}", "color": NAVY})
-        if nr > 1:
-            self.add({"op": "char", "table": t, "cells": f"A2:{cell(0, nr - 1)}", "bold": True},
-                     {"op": "table.fill", "table": t, "cells": f"A2:{cell(0, nr - 1)}", "color": "#F5F7FA"})
+                 {"op": "table.border", "table": t, "cells": f"A1:{last}", "line": "none", "sides": "left,right"})
+        if head:
+            self.add({"op": "table.border", "table": t, "cells": f"A1:{cell(nc - 1, 0)}", "line": "solid", "width": "0.3mm", "color": NAVY, "sides": "bottom"},
+                     {"op": "char", "table": t, "cells": f"A1:{cell(nc - 1, 0)}", "color": NAVY},
+                     {"op": "table.align", "table": t, "cells": f"A1:{cell(nc - 1, 0)}", "h": "center", "v": "middle"})
+        if nr > top:
+            first = f"A{top + 1}:{cell(0, nr - 1)}"
+            self.add({"op": "char", "table": t, "cells": first, "bold": True},
+                     {"op": "table.fill", "table": t, "cells": first, "color": LABEL},
+                     {"op": "table.align", "table": t, "cells": first, "h": "center", "v": "middle"})
+            for c in nums:
+                self.add({"op": "table.align", "table": t, "cells": f"{cell(c, top)}:{cell(c, nr - 1)}", "h": "right", "v": "middle"})
+            for r in totals:
+                row = f"{cell(1 if any(g[0] < r <= g[1] for g in groups) else 0, r)}:{cell(nc - 1, r)}"
+                self.add({"op": "char", "table": t, "cells": row, "bold": True},
+                         {"op": "table.fill", "table": t, "cells": row, "color": TOTAL})
 
     def callout(self, text):
-        t = self.table([[" ", text]], [2.5, self.w - 2.5], font=BODYF, size=11.5, pad_pt=4, word_wrap="word", table_align="center")
+        t = self.table([[" ", text]], [2.5, self.w - 2.5], font=REPORTF, size=10.5, pad_pt=4, word_wrap="word", table_align="center")
         self.add({"op": "table.border", "table": t, "cells": "A1:B1", **NONE},
                  {"op": "table.fill", "table": t, "cells": "A1", "color": ACCENT},
                  {"op": "table.fill", "table": t, "cells": "B1", "color": "#FDF3EA"},

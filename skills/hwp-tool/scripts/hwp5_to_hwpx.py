@@ -882,9 +882,9 @@ class Conv:
         return ""
 
     # ───────── 꾸러미 ─────────
-    def build(self, out):
+    def sections_xml(self):
+        """구역마다 section XML 글. hwp_tool read도 이것으로 HWP를 읽는다(HWPX 읽기와 한 길)."""
         self.open_fields = []
-        sections = []
         for k in sorted(self.d.sections, key=lambda n: int(n[16:] or 0)):
             view = "ViewText/" + k.split("/")[1]
             recs = self.d.sections[k]
@@ -894,7 +894,10 @@ class Conv:
                     recs = read_records(zlib.decompress(raw, -15) if self.d.compressed else raw)
                 except zlib.error:
                     self.warn("ViewText를 풀지 못해 본문으로 씀")
-            sections.append(self.section(recs))
+            yield self.section(recs)
+
+    def build(self, out):
+        sections = list(self.sections_xml())
         header = self.header()
         z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED)
         z.writestr(zipfile.ZipInfo("mimetype"), "application/hwp+zip", compress_type=zipfile.ZIP_STORED)

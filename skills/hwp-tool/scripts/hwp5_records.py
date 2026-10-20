@@ -446,10 +446,11 @@ def _fields(*groups):
     return dec, enc
 
 
-# 개체 공통 속성 (표 69) — 컨트롤 ID 뒤. 설명문 뒤에 2바이트가 더 붙는 판이 있다(_rest)
+# 개체 공통 속성 (표 69) — 컨트롤 ID 뒤. 설명문 뒤에 2바이트가 더 붙는 판이 있고, 설명문이 아예 없는 판도 있다
+# (정부24 별지 제27호서식: 표 컨트롤 44바이트 — 2026-10-21)
 OBJ_COMMON = _fields([("attr", "I"), ("v_offset", "i"), ("h_offset", "i"), ("width", "i"), ("height", "i"),
-                      ("z_order", "i"), ("margins", "4h"), ("instance_id", "I"), ("prevent_page_break", "i"),
-                      ("description", "wstr")])
+                      ("z_order", "i"), ("margins", "4h"), ("instance_id", "I"), ("prevent_page_break", "i")],
+                     [("description", "wstr")])
 OBJ_CTRLS = {"tbl ", "gso ", "eqed", "form", "$lin", "$rec", "$ell", "$arc", "$pol", "$cur", "$pic", "$ole", "$con"}
 # 필드 (표 152) — 끝 4바이트는 규격에 없다: 메모(%unk)면 메모 번호(MEMO_LIST 값·HWPX zorder와 같음), 다른 필드는 0
 FIELD = _fields([("attr", "I"), ("extra_attr", "B"), ("command", "wstr"), ("field_id", "I")], [("memo_index", "I")])

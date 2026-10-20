@@ -27,8 +27,8 @@ def main():
                {"op": "header", "text": "시험 머리말", "align": "right"},
                {"op": "page_number", "pos": "bottom-center"}], open(ops, "w", encoding="utf-8"), ensure_ascii=False)
     new_ops = os.path.join(out, "new_ops.json")
-    json.dump([{"op": "p", "text": "새 문서 시험", "size": 14, "bold": True},
-               {"op": "table.create", "data": [["가", "나"], ["1", "2"]], "header": True}],
+    json.dump([{"op": "p", "text": "새 문서 시험", "size": 14, "bold": True, "font": "맑은 고딕"},   # 글꼴 없으면 검수가 막는다(바탕)
+               {"op": "table.create", "data": [["가", "나"], ["1", "2"]], "header": True, "font": "맑은 고딕"}],
               open(new_ops, "w", encoding="utf-8"), ensure_ascii=False)
     tool = os.path.join(HERE, "hwp_tool.py")
     steps = [

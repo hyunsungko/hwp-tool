@@ -13,7 +13,7 @@
 엔진: 한컴이 있으면 한컴 COM(hwp_com.py), 없으면 HWPX 직접(hwpx_direct.py)·HWP 글 바꾸기 직접(hwp5_direct.py).
 원본은 고치지 않는다: -o 가 원본과 같으면 멈춘다.
 """
-import argparse, html, io, json, os, re, shutil, struct, sys, time, zipfile, zlib
+import argparse, html, io, json, os, re, shutil, struct, sys, time, zipfile
 
 # ───────────────────────── 공통 문서 모양: 문단과 표 ─────────────────────────
 # 블록 = ("p", 글) 또는 ("table", [[칸 글, ...], ...])  — 칸 글 안의 줄바꿈은 <br>로 바꿔 Markdown 표에 담는다.
@@ -49,10 +49,19 @@ def to_text(blocks):
     return "\n".join(out).strip() + "\n"
 
 
+MAX_CELLS = 100_000   # 표 하나의 최대 칸 수(말뭉치 1,571개 중 가장 큰 표 13,902칸의 약 7배). 넘으면 grid가 칸 배치를 버린다
+
+
 def grid(cells, rows, cols):
-    """(행, 열, 행합침, 열합침, 글) 목록 → rows×cols 표. 합친 칸은 첫 칸에만 글."""
-    rows = max([rows] + [r + 1 for r, *_ in cells]) if cells else rows
-    cols = max([cols] + [c + 1 for _, c, *_ in cells]) if cells else cols
+    """(행, 열, 행합침, 열합침, 글) 목록 → rows×cols 표. 합친 칸은 첫 칸에만 글.
+    표 머리글의 rows·cols를 알면 그 밖의 칸은 버리고, 모르면 칸 주소로 짠다. 어느 쪽이든 MAX_CELLS를 넘지 않는다
+    (2026-10-20: 캡션을 칸으로 잘못 읽어 주소 51002×13137 → 6억 칸, 메모리 49GB)."""
+    if not (rows and cols) and cells:
+        rows = max([rows] + [r + 1 for r, *_ in cells])
+        cols = max([cols] + [c + 1 for _, c, *_ in cells])
+    if rows * cols > MAX_CELLS:   # 크기·주소가 깨졌다: 그 표만 칸 배치를 버리고 글은 받은 순서대로 한 줄씩
+        print(f"경고: 표 크기 {rows}×{cols}가 상한 {MAX_CELLS:,}칸을 넘어 칸 배치 없이 글만 넣음", file=sys.stderr)
+        return [[t] for *_, t in cells]
     g = [[""] * cols for _ in range(rows)]
     for r, c, rs, cs, t in cells:
         if r < rows and c < cols:
@@ -97,55 +106,6 @@ def hwp5_text(data):
     return out.decode("utf-16le", "replace").rstrip("\r\n")
 
 
-def hwp5_blocks(recs):
-    """레코드 수준(level)을 따라 문단과 표(칸 주소·합침 포함)를 짠다. 표 밖 다른 개체(글상자·각주 등)의 글은 문단으로."""
-    n = len(recs)
-
-    def paras(i, level, stop_at_cell):
-        blocks = []
-        while i < n:
-            tag, lv, data = recs[i]
-            if lv < level or (stop_at_cell and lv == level and tag == LIST_HEADER):
-                break
-            if tag == PARA_HEADER and lv == level:
-                i += 1
-                text, extra = "", []
-                while i < n and recs[i][1] > level:
-                    t2, l2, d2 = recs[i]
-                    if t2 == PARA_TEXT and l2 == level + 1:
-                        text = hwp5_text(d2); i += 1
-                    elif t2 == CTRL_HEADER and l2 == level + 1 and d2[:4] == b" lbt":   # 'tbl '를 거꾸로 적음
-                        table, i = tbl(i + 1, level + 2); extra.append(table)
-                    elif t2 == PARA_TEXT:   # 다른 개체 안 문단(글상자·각주 등)
-                        t = hwp5_text(d2)
-                        if t.strip(): extra.append(("p", t))
-                        i += 1
-                    else:
-                        i += 1
-                blocks.append(("p", text)); blocks += extra
-            else:
-                i += 1
-        return blocks, i
-
-    def tbl(i, level):
-        rows = cols = 0
-        cells = []
-        while i < n and recs[i][1] >= level:
-            tag, lv, data = recs[i]
-            if tag == TABLE and lv == level and len(data) >= 8:
-                rows, cols = struct.unpack_from("<HH", data, 4); i += 1
-            elif tag == LIST_HEADER and lv == level and len(data) >= 16:
-                col, row, cspan, rspan = struct.unpack_from("<HHHH", data, 8)
-                inner, i = paras(i + 1, level, True)
-                cells.append((row, col, rspan, cspan, cell_text(inner)))
-            else:
-                i += 1
-        return ("table", grid(cells, rows, cols)), i
-
-    blocks, _ = paras(0, 0, False)
-    return blocks
-
-
 def cell_text(blocks):
     parts = []
     for kind, value in blocks:
@@ -172,16 +132,20 @@ def read_hwp5(path):
             raise PermissionError("암호가 걸린 문서")
         if info["배포용"]:
             raise PermissionError("배포용 문서(본문 암호화) — 한컴으로만 열 수 있음")
-        secs = sorted((s for s in ole.listdir() if s[0] == "BodyText" and s[1].startswith("Section")),
-                      key=lambda s: int(s[1][7:] or 0))
-        blocks = []
-        for s in secs:
-            raw = ole.openstream("/".join(s)).read()
-            blocks += hwp5_blocks(hwp5_records(zlib.decompress(raw, -15) if info["압축"] else raw))
-        info.update(구역=len(secs))
-        return blocks, info
     finally:
         ole.close()
+    # HWP는 우리 변환기(hwp5_to_hwpx)로 구역 XML을 만들어 HWPX와 같은 길로 읽는다(2026-10-20). 레코드를 따로 풀던
+    # hwp5_blocks는 표 캡션을 칸으로 읽어 6억 칸 표를 만들었고(메모리 49GB), 한컴이 저장한 HWPX와 맞는 문서도
+    # 296/341이었다(변환기 길 339/341).
+    import hwp5_to_hwpx
+    from lxml import etree
+    blocks, n = [], 0
+    for xml in hwp5_to_hwpx.Conv(path).sections_xml():
+        n += 1
+        for p in etree.fromstring(xml.encode("utf-8")).findall(f"{HP}p"):
+            blocks += hwpx_para(p)
+    info.update(구역=n)
+    return blocks, info
 
 
 # ───────────────────────── HWPX 직접 해석 ─────────────────────────
@@ -212,7 +176,7 @@ def hwpx_para(p):
             if el.tag == f"{HP}t":
                 text.append(hwpx_t(el))
             elif el.tag == f"{HP}tbl":
-                extra.append(hwpx_table(el))
+                extra += hwpx_table(el)
             else:   # 글상자 등: 그 안 문단 글
                 for sub in el.iter(f"{HP}subList"):
                     for q in sub.findall(f"{HP}p"):
@@ -246,7 +210,14 @@ def hwpx_table(tbl):
         for q in (sub.findall(f"{HP}p") if sub is not None else []):
             inner += hwpx_para(q)
         cells.append((r, c, rs, cs, cell_text(inner)))
-    return ("table", grid(cells, rows, cols))
+    table = [("table", grid(cells, rows, cols))]
+    cap = tbl.find(f"{HP}caption")   # 캡션 글은 HWP 해석과 같게 표 앞(아래 캡션은 뒤) 문단으로
+    if cap is None:
+        return table
+    sub = cap.find(f"{HP}subList")
+    inner = [b for q in (sub.findall(f"{HP}p") if sub is not None else []) for b in hwpx_para(q)
+             if b[0] != "p" or b[1].strip()]
+    return table + inner if cap.get("side") == "BOTTOM" else inner + table
 
 
 # ───────────────────────── 한컴 COM ─────────────────────────
@@ -393,7 +364,8 @@ def read_any(path, engine="auto"):
 # ───────────────────────── Markdown → HTML (쓰기용) ─────────────────────────
 def md_to_html(md):
     out, i, lines = [], 0, md.replace("\r\n", "\n").split("\n")
-    inline = lambda s: re.sub(r"\*(.+?)\*", r"<i>\1</i>", re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", html.escape(s)))
+    # quote=False: 한컴 HTML 가져오기는 &quot;를 '&'로 넣는다("취업상담" → &취업상담& — 2026-10-21 실측). 글 속 따옴표는 그대로 둔다
+    inline = lambda s: re.sub(r"\*(.+?)\*", r"<i>\1</i>", re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", html.escape(s, quote=False)))
     while i < len(lines):
         line = lines[i]
         if not line.strip():
@@ -536,35 +508,210 @@ def cmd_import_json(a):
 
 
 def cmd_write(a):
+    """Markdown·글은 언제나 보고서·논문 모양(md_write)으로 쓴다. 한컴 HTML 가져오기(바탕 글꼴·맨 표)는 HTML을 넣거나
+    --engine com을 줄 때만(2026-10-21: 한컴이 있으면 기본으로 이 길을 타 날것 같은 문서가 나갔다). 쓴 뒤 검수한다."""
     src = open(a.file, encoding="utf-8").read()
     ext = os.path.splitext(a.file)[1].lower()
-    doc = src if ext in (".html", ".htm") else md_to_html(src) if ext in (".md", ".markdown") else \
-        "<html><body>" + "".join(f"<p>{html.escape(l)}</p>" for l in src.splitlines()) + "</body></html>"
-    if getattr(a, "engine", "auto") == "direct" or not hancom_installed():
-        if ext not in (".md", ".markdown", ".txt"):
-            sys.exit("한컴 없이 쓰기는 Markdown(.md)·글(.txt)만 됩니다. HTML은 한컴 경로(--engine com)")
-        import md_write                          # 한컴 없이 Markdown → HWPX(→ HWP)
-        t = time.time()
+    t = time.time()
+    if ext in (".md", ".markdown", ".txt") and getattr(a, "engine", "auto") != "com":
+        import md_write                          # Markdown → HWPX(→ HWP), 한컴 없이
         to_hwp = a.output.lower().endswith(".hwp")
-        polish = getattr(a, "polish", False) and hancom_installed()
+        polish = hancom_installed() and not getattr(a, "no_polish", False)
         target = a.output + ".tmp.hwpx" if (to_hwp or polish) else a.output
         for line in md_write.write(src, target, getattr(a, "header", None), os.path.dirname(os.path.abspath(a.file)),
                                     getattr(a, "style", "report")):
             if "실패" in line:
                 print(line, file=sys.stderr)
-        if polish:
+        if polish:                               # 한컴(숨긴 데스크톱)으로 줄 배치를 짜고 낱말 잘림·벌어진 줄을 다듬는다
             polish_layout(target, a.output)
             os.remove(target)
         elif to_hwp:
             hwpx_to_hwp_direct(target, a.output)
             os.remove(target)
-        print(f"직접 경로(Markdown → {'HWP' if to_hwp else 'HWPX'}) · {time.time() - t:.1f}초 · 저장: {a.output}", file=sys.stderr)
+        print(f"Markdown → {'HWP' if to_hwp else 'HWPX'}({getattr(a, 'style', 'report')}"
+              f"{', 한컴 줄 배치' if polish else ''}) · {time.time() - t:.1f}초 · 저장: {a.output}", file=sys.stderr)
+    else:
+        if not hancom_installed():
+            sys.exit("한컴 없이 쓰기는 Markdown(.md)·글(.txt)만 됩니다. HTML은 한컴이 있어야 합니다")
+        doc = src if ext in (".html", ".htm") else md_to_html(src) if ext in (".md", ".markdown") else \
+            "<html><body>" + "".join(f"<p>{html.escape(l, quote=False)}</p>" for l in src.splitlines()) + "</body></html>"
+        with Hancom() as hwp:
+            if not hwp.SetTextFile(doc, "HTML", ""):
+                raise RuntimeError("한글이 HTML을 받아들이지 않음")
+            com_save(hwp, a.output)
+            print(f"한컴 HTML 가져오기(서식은 HTML 그대로 — 보고서 모양 아님) · 쪽수 {hwp.PageCount} · 저장: {a.output}", file=sys.stderr)
+    run_qa(a, strict=True)
+
+
+def run_qa(a, strict):
+    """저장한 문서를 검수해 알리고, 오류가 있으면 종료 코드 3(파일은 남긴다). --no-check면 건너뛴다."""
+    if getattr(a, "no_check", False) or not a.output.lower().endswith((".hwp", ".hwpx")):
         return
-    with Hancom() as hwp:
-        if not hwp.SetTextFile(doc, "HTML", ""):
-            raise RuntimeError("한글이 HTML을 받아들이지 않음")
-        com_save(hwp, a.output)
-        print(f"쪽수 {hwp.PageCount}, 저장: {a.output}", file=sys.stderr)
+    import hwp_qa
+    folder = os.path.join(a.check, "검수") if getattr(a, "check", None) else None
+    rep = hwp_qa.inspect(a.output, folder, strict=strict)
+    for line in hwp_qa.summary(rep):
+        print(line, file=sys.stderr)
+    if any(p["수준"] == "오류" for p in rep["문제"]):
+        print(f"검수에 걸렸습니다 — 위 오류를 고치고 쪽 그림을 확인한 뒤 넘기세요(파일은 저장됨: {a.output}). "
+              "검수를 건너뛰려면 --no-check", file=sys.stderr)
+        sys.exit(3)
+
+
+def loose_lines(d):
+    """양쪽 정렬·어절 줄 나눔 문단에서 띄어쓰기가 벌어진 줄 수 → {문단 번호: 줄 수}.
+    줄마다 (글자 폭 합 / 줄 폭)을 재서, 같은 문단에서 가장 꽉 찬 줄의 90%에 못 미치면 벌어진 줄로 본다(마지막 줄 제외)."""
+    import hwp_typeset as ts
+    import hwpx_direct as X
+    just = {pr.get("id") for pr in d.header.iter(X.HH + "paraPr")
+            if pr.find(X.HH + "align") is not None and pr.find(X.HH + "align").get("horizontal") == "JUSTIFY"}
+    out = {}
+    for i, p in enumerate(d.all_paras()):
+        if p.get("paraPrIDRef") not in just or not ts.word_wrapped(d, p):
+            continue
+        t, ls = ts.plain_text(p), ts.lines_of(p)
+        if not t or len(ls) < 3:
+            continue
+        fills = [sum(ts._w(c) for c in t[a["textpos"]:b["textpos"]].strip()) / max(1, a["horzsize"]) for a, b in zip(ls, ls[1:])]
+        n = sum(1 for f in fills if f < 0.9 * max(fills))
+        if n:
+            out[i] = n
+    return out
+
+
+def lonely_headers(d):
+    """쪽을 넘는(자리 차지) 표 가운데, 표를 담은 문단의 쪽 안 위치 + 머리 줄 + 첫 줄 묶음(첫 칸 세로 합침만큼) 높이가
+    본문 높이를 넘는 표는 그 문단에 쪽 나눔을 건다. 고친 표 수를 돌려준다."""
+    import hwp_typeset as ts
+    import hwpx_direct as X
+    pr = d.secprs()[0].find(X.HP + "pagePr")
+    m = pr.find(X.HP + "margin")
+    body_h = int(pr.get("height")) - sum(int(m.get(k)) for k in ("top", "bottom", "header", "footer"))
+
+    def cell_h(tc):                      # 칸 높이 = 칸 안 마지막 줄 끝 + 칸 위아래 여백(저장된 cellSz 높이는 최솟값일 수 있다)
+        end = 0
+        for q in tc.iter(X.HP + "p"):
+            for ln in ts.lines_of(q):
+                end = max(end, ln["vertpos"] + ln["vertsize"])
+        mg = tc.find(X.HP + "cellMargin")
+        pad = int(mg.get("top", 0)) + int(mg.get("bottom", 0)) if mg is not None else 282
+        return max(int(tc.find(X.HP + "cellSz").get("height")), end + pad)
+    n = 0
+    for p in d.body():
+        tbl = p.find(f"{X.HP}run/{X.HP}tbl")
+        if tbl is None or tbl.find(X.HP + "pos").get("treatAsChar") != "0" or p.get("pageBreak") == "1":
+            continue
+        rows = tbl.findall(X.HP + "tr")
+        if len(rows) < 2 or rows[0].find(X.HP + "tc").get("header") != "1":
+            continue
+        ls = ts.lines_of(p)
+        if not ls:
+            continue
+        h = [max(cell_h(tc) for tc in r.findall(X.HP + "tc")) for r in rows]
+        span = int(rows[1].find(X.HP + "tc").find(X.HP + "cellSpan").get("rowSpan", "1"))
+        if ls[0]["vertpos"] > 0 and ls[0]["vertpos"] + sum(h[:1 + span]) > body_h:
+            p.set("pageBreak", "1")
+            d.touch(p)
+            n += 1
+    return n
+
+
+def polish_layout(src, out):
+    """한컴(숨긴 데스크톱)으로 줄 배치를 잰 뒤, 줄 끝에서 낱말이 잘린 문단만 문단 전체의 자간·장평을 조금씩 줄여
+    낱말이 한 줄에 들어가게 한다. 잘림이 없는 문단은 건드리지 않는다. out은 .hwp·.hwpx 모두."""
+    import tempfile
+    import hwp_typeset as ts
+    import hwpx_direct as X
+    from hwp_com import Session
+    # 단계: (자간 더하기 %, 장평 %) — 본문은 4단계(자간 -5·장평 97)까지, 표 칸은 끝까지
+    steps = [(0, 100), (-2, 100), (-4, 100), (-5, 98), (-5, 96), (-6, 94), (-6, 92)]
+    body_max = 4
+    work = tempfile.mkdtemp(prefix="hwppolish_")
+    base, cur = os.path.join(work, "laid.hwpx"), os.path.join(work, "cur.hwpx")
+    level = {}
+    with Session() as hwp:
+        ts.relayout(hwp, src, base)
+        cur_src = base
+        for rnd in range(len(steps)):
+            d = X.Hwpx(cur_src)
+            paras = d.all_paras()
+            _, where = ts.count_breaks(d, list(range(len(paras))))
+            split = sorted({w[0] for w in where if w[1] == "split"})
+            print(f"자간·장평 {rnd}바퀴: 낱말 잘림 문단 {len(split)}개", file=sys.stderr)
+            bumped = False
+            for i in split:
+                cap = len(steps) - 1 if any(a.tag == X.HP + "tc" for a in paras[i].iterancestors()) else body_max
+                if level.get(i, 0) < cap:
+                    level[i] = level.get(i, 0) + 1
+                    bumped = True
+            if not bumped:
+                break
+            d = X.Hwpx(base)                     # 매 바퀴 원본에 다시 입힌다(겹쳐 줄지 않게)
+            paras = d.all_paras()
+            for i, lv in level.items():
+                sp, ratio = steps[lv]
+                for run in paras[i].findall(X.HP + "run"):
+                    run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
+                d.touch(paras[i])
+            tmp = os.path.join(work, f"r{rnd}.hwpx")
+            d.save(tmp)
+            ts.relayout(hwp, tmp, cur)
+            cur_src = cur
+        # 띄어쓰기가 벌어진 줄(양쪽 정렬에서 다음 어절이 안 들어가 빈칸이 늘어난 줄): 그 문단 자간을 조금씩 줄여
+        # 벌어진 줄이 가장 적은 값을 고른다. 낱말 잘림을 맞춘 문단은 건드리지 않는다.
+        loose_base = os.path.join(work, "loose_base.hwpx")
+        shutil.copy(cur_src, loose_base)
+        d = X.Hwpx(loose_base)
+        best = {i: (n, 0) for i, n in loose_lines(d).items() if i not in level}
+        tried = 0
+        for sp, ratio in ((-2, 100), (-4, 100), (-6, 100), (-5, 97), (-6, 95)):
+            if not any(n for n, _ in best.values()):
+                break
+            d = X.Hwpx(loose_base)
+            paras = d.all_paras()
+            for i, (n, _) in best.items():
+                if n:
+                    for run in paras[i].findall(X.HP + "run"):
+                        run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
+                    d.touch(paras[i])
+            tmp, laid2 = os.path.join(work, f"l{sp}.hwpx"), os.path.join(work, f"l{sp}_laid.hwpx")
+            d.save(tmp)
+            ts.relayout(hwp, tmp, laid2)
+            now = loose_lines(X.Hwpx(laid2))
+            for i, (n, v) in list(best.items()):
+                if n and now.get(i, 0) < n:
+                    best[i] = (now.get(i, 0), (sp, ratio))
+            tried += 1
+        fixed = {i: v for i, (n, v) in best.items() if v}
+        print(f"벌어진 줄: 문단 {len(best)}개 중 {len(fixed)}개 자간·장평 조정, 남은 벌어진 줄 {sum(n for n, _ in best.values())}",
+              file=sys.stderr)
+        if fixed:
+            d = X.Hwpx(loose_base)
+            paras = d.all_paras()
+            for i, (sp, ratio) in fixed.items():
+                for run in paras[i].findall(X.HP + "run"):
+                    run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
+                d.touch(paras[i])
+            tmp = os.path.join(work, "loose.hwpx")
+            d.save(tmp)
+            cur_src = os.path.join(work, "loose_laid.hwpx")
+            ts.relayout(hwp, tmp, cur_src)
+        # 쪽 끝에 표 머리 줄만 남는 표(머리 줄 + 첫 줄 묶음이 남은 자리에 안 들어감)는 다음 쪽에서 시작한다
+        d = X.Hwpx(cur_src)
+        moved = lonely_headers(d)
+        if moved:
+            tmp = os.path.join(work, "head.hwpx")
+            d.save(tmp)
+            cur_src = os.path.join(work, "head_laid.hwpx")
+            ts.relayout(hwp, tmp, cur_src)
+            print(f"머리 줄만 남던 표 {moved}개를 다음 쪽으로", file=sys.stderr)
+        if not hwp.Open(os.path.abspath(cur_src), "", ts.OPEN_OPT):
+            raise RuntimeError("한컴이 다듬은 파일을 열지 못함")
+        pages = hwp.PageCount
+        if not hwp.SaveAs(os.path.abspath(out), "HWP" if out.lower().endswith(".hwp") else "HWPX", ""):
+            raise RuntimeError(f"저장하지 못함(다른 프로그램에서 열려 있는지 확인): {out}")
+        hwp.Clear(1)
+    print(f"다듬기: 조정한 문단 {len(level)} · 남은 잘림 문단 {len(split)} · {pages}쪽", file=sys.stderr)
 
 
 def loose_lines(d):
@@ -808,6 +955,8 @@ def edit_engine(a, ops):
     out_hwp = a.output.lower().endswith(".hwp")
     if any(o.get("op") == "action" for o in ops):
         return "com"
+    if any(o.get("op") == "image" and (o.get("over") or o.get("float")) for o in ops):
+        return "direct"                          # 글 앞 띄우기·글자 위 겹치기는 직접 경로만 안다(HWP도 변환해 고친다)
     if not src_hwp and not out_hwp:
         return "direct"
     if src_hwp and out_hwp and all(o.get("op") in ("replace", "fill") and not o.get("scope") for o in ops):
@@ -863,6 +1012,7 @@ def cmd_edit(a):
             print("줄 배치: 없음 — 한컴 데스크톱은 열 때 다시 짠다. 한컴 뷰어·웹 한글·모바일은 확인 안 됨", file=sys.stderr)
     if a.check:
         check_report(None if new else a.file, a.output, a.check)
+    run_qa(a, strict=new)                        # 새 문서는 서식까지, 고친 문서는 빈 쪽·남은 기호·넘친 글을 본다
 
 
 def check_report(src, out, folder):
@@ -932,10 +1082,11 @@ def may_use_hancom(a):
     """이 명령이 한컴(COM)을 띄울 수 있으면 True. 한컴이 없거나 직접 경로로 끝나는 명령은 False."""
     if a.cmd in ("actions", "outline") or not hancom_installed():
         return False
-    if a.cmd == "write" and getattr(a, "polish", False):
-        return True
-    if a.cmd == "edit":                 # 직접 경로라도 줄 배치(--layout auto|hancom)는 한컴을 쓴다
-        return bool(a.check) or edit_engine(a, load_ops(a)) == "com" or layout_mode(a) == "hancom"
+    if a.cmd == "write":                # 줄 배치 다듬기·검수 쪽 그림은 한컴을 쓴다
+        return not (a.no_polish and a.no_check) or a.engine == "com" or \
+            not a.file.lower().endswith((".md", ".markdown", ".txt"))
+    if a.cmd == "edit":                 # 직접 경로라도 줄 배치(--layout auto|hancom)·검수는 한컴을 쓴다
+        return bool(a.check) or not a.no_check or edit_engine(a, load_ops(a)) == "com" or layout_mode(a) == "hancom"
     if getattr(a, "engine", "auto") == "direct" and not getattr(a, "check", None):
         return False
     if a.cmd == "info":
@@ -967,7 +1118,10 @@ def main():
     p.add_argument("--engine", choices=["auto", "com", "direct"], default="auto", help="direct = 한컴 없이(Markdown만)")
     p.add_argument("--style", choices=["report", "paper"], default="report", help="report=보고서 · paper=2단 논문(요약·3선 표·각주·참고문헌)")
     p.add_argument("--header", help="머리말 글(기본: 첫 제목)")
-    p.add_argument("--polish", action="store_true", help="한컴이 있으면 줄 끝 낱말 끊김을 자간으로 맞춘다(숨긴 데스크톱)")
+    p.add_argument("--polish", action="store_true", help="(기본으로 켜짐 — 옛 인자) 한컴이 있으면 줄 배치를 짜고 낱말 잘림을 다듬는다")
+    p.add_argument("--no-polish", action="store_true", help="한컴 줄 배치·다듬기를 하지 않는다")
+    p.add_argument("--no-check", action="store_true", help="저장 뒤 검수(쪽 그림·남은 기호·빈 쪽·쪽 끝 제목 등)를 건너뛴다")
+    p.add_argument("--check", metavar="폴더", help="검수 쪽 그림을 이 폴더에(기본: 임시 폴더)")
     p = sub.add_parser("convert"); p.add_argument("file"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--engine", choices=["auto", "com", "direct"], default="auto",
                    help="direct = 한컴 없이(HWPX ↔ HWP는 우리 변환기 hwpx2hwp·hwp5_to_hwpx). auto = 한컴이 있으면 한컴")
@@ -977,6 +1131,7 @@ def main():
     p.add_argument("--engine", choices=["auto", "com", "direct"], default="auto")
     p.add_argument("--keep-going", action="store_true", help="실패한 명령이 있어도 계속하고 저장")
     p.add_argument("--check", metavar="폴더", help="저장 뒤 쪽 그림 비교·다시 열기·HWP↔HWPX 왕복 결과를 이 폴더에")
+    p.add_argument("--no-check", action="store_true", help="저장 뒤 검수(빈 쪽·남은 기호·넘친 글 등)를 건너뛴다")
     p.add_argument("--layout", choices=["auto", "hancom", "none"], default="auto",
                    help="직접 경로 결과의 줄 배치: auto=한컴이 있으면 한컴으로 다시 짜서 써 둠, none=줄 배치 없이 둠")
     p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output", required=True)

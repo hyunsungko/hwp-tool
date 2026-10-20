@@ -1338,16 +1338,20 @@ class Editor:
             tbl.find(HP + "pos").attrib.update({"treatAsChar": "1", "vertRelTo": "PARA", "horzRelTo": "COLUMN",
                                                 "vertOffset": "0", "horzOffset": "0", "horzAlign": "LEFT"})
         q = self._new_para_after(p)
+        # 쪽 나눔·줄 묶기는 앞 문단에서 물려받지 않는다(앞 p의 page_break_before가 표 문단·꼬리 문단으로 새어 빈 쪽 2장 — 2026-10-21)
         q.set("paraPrIDRef", d.parapr(p.get("paraPrIDRef", "0"), {
             "align": o.get("table_align", "center"), "left_mm": 0, "indent_mm": 0, "before_pt": 0, "after_pt": 0,
-            "line_spacing": 100, "keep_with_next": bool(o.get("keep_with_next")), "heading": ("NONE", 0, 0)}))
+            "line_spacing": 100, "keep_with_next": bool(o.get("keep_with_next")), "page_break_before": False,
+            "keep_lines": False, "heading": ("NONE", 0, 0)}))
         implode(q, [Item("obj", tbl, anchor), Item("empty", None, anchor)])
         if o.get("page_break"):                      # 표 문단을 새 쪽에서 시작(장 제목 띠 등)
             q.set("pageBreak", "1")
         if not ("after" in o or "before" in o or "para_end" in o or "cell" in o):
             # 한컴은 문서 끝에 표를 만들면 표 문단 아래에 같은 모양의 빈 문단을 하나 남긴다(빠지면 아래 내용이 한 줄씩 올라온다)
             tail = self._new_para_after(q, like=q)
-            if o.get("keep_with_next"):                  # 표 문단만 다음 문단과 붙이고 아래 남는 빈 문단은 붙이지 않는다(한컴 6곳)
+            if o.get("keep_with_next") and o.get("keep_with_next") != "chain":
+                # 표 문단만 다음 문단과 붙이고 아래 남는 빈 문단은 붙이지 않는다(한컴 6곳). "chain"이면 빈 문단도 붙여
+                # 장 제목 띠가 다음 내용과 같은 쪽에 가게 한다(빈 문단에서 끊겨 제목만 쪽 끝에 남았다 — 2026-10-21)
                 tail.set("paraPrIDRef", d.parapr(q.get("paraPrIDRef"), {"keep_with_next": False}))
             implode(tail, [Item("empty", None, anchor)])
         if "after" in o or "before" in o or "para_end" in o:
@@ -1454,11 +1458,80 @@ class Editor:
         etree.SubElement(pic, HP + "outMargin", {"left": "0", "right": "0", "top": "0", "bottom": "0"})
         sc = etree.SubElement(pic, HP + "shapeComment")
         sc.text = f"그림입니다.\n원본 그림의 이름: {os.path.basename(path)}\n원본 그림의 크기: 가로 {pw}pixel, 세로 {ph}pixel"
-        p, pos = self._point(o)
+        if o.get("over"):                         # 도장·서명: 그 글자 위에 겹친다(글 앞으로 띄움)
+            p, pos, note = self._over_spot(o, pic, W, H)
+        else:
+            p, pos = self._point(o)
+            note = ""
+            if o.get("float"):
+                self._float(pic, o["float"], 0, 0)
         items = explode(p)
         ra = self._run_at(items, pos)
-        self._insert_items(p, pos, [Item("obj", pic, ra), Item("empty", None, ra)])
-        return "그림 넣음"
+        self._insert_items(p, pos, [Item("obj", pic, ra)] + ([] if o.get("over") or o.get("float") else [Item("empty", None, ra)]))
+        return "그림 넣음" + note
+
+    WRAP = {"front": "IN_FRONT_OF_TEXT", "behind": "BEHIND_TEXT"}
+
+    def _float(self, pic, how, h_off, v_off):
+        """글자처럼 취급하지 않고 문단 기준으로 띄운다. 음수 위치는 한컴처럼 부호 없는 32비트로 적는다(그냥 음수면 0이 됨)."""
+        pic.set("textWrap", self.WRAP.get(how, "IN_FRONT_OF_TEXT"))
+        pic.find(HP + "pos").attrib.update({"treatAsChar": "0", "allowOverlap": "1", "flowWithText": "1", "vertRelTo": "PARA",
+                                            "horzRelTo": "PARA", "vertAlign": "TOP", "horzAlign": "LEFT",
+                                            "vertOffset": str(int(v_off) & 0xFFFFFFFF), "horzOffset": str(int(h_off) & 0xFFFFFFFF)})
+
+    def _over_spot(self, o, pic, W, H):
+        """o['over'] 글(nth번째, 기본 마지막)을 품은 문단과 그 글 자리. 그림 가운데가 그 글 가운데에 오게 위치를 어림한다:
+        줄 배치(linesegarray)가 있으면 그 줄의 x·y·폭을, 없으면 칸·본문 폭을 쓰고, 글 폭은 글자 크기 × (한글 1·영숫자 0.55·빈칸 0.5)."""
+        import hwp_typeset as ts
+        d = self.d
+        hits = d.matches(o["over"])
+        if not hits:
+            raise ValueError(f"'{o['over']}' 글이 없습니다")
+        p, a, b = hits[int(o.get("nth", -1))]
+        text = para_text(p)
+        lines = ts.lines_of(p)
+        line = None
+        for i, ln in enumerate(lines):
+            if ln["textpos"] <= a:
+                line = (ln, lines[i + 1]["textpos"] if i + 1 < len(lines) else len(text))
+        # 글자 크기: 그 글이 든 run의 글자 모양
+        cps = {cp.get("id"): int(cp.get("height", 1000)) for cp in d.reflist("charProperties")}
+        run = self._run_at(explode(p), a)
+        size = cps.get((run or {}).get("charPrIDRef", "0"), 1000)          # HWPUNIT(1pt = 100)
+        if line:                                  # 줄 세로 자리는 칸(본문) 위에서 잰 값 → 문단 첫 줄 기준으로
+            ln, end = line
+            x0, lw, y0, lh, s = ln["horzpos"], ln["horzsize"], ln["vertpos"] - lines[0]["vertpos"], ln["vertsize"], ln["textpos"]
+        else:
+            tc = next((x for x in p.iterancestors() if x.tag == HP + "tc"), None)
+            if tc is not None:
+                mg = tc.find(HP + "cellMargin")
+                lw = int(tc.find(HP + "cellSz").get("width")) - (int(mg.get("left", 510)) + int(mg.get("right", 510)) if mg is not None else 1020)
+            else:
+                lw = d.text_width(d.secprs()[0])
+            x0, y0, lh, s, end = 0, 0, int(size * 1.0), 0, len(text)
+        seg = text[s:end].rstrip("\r\n ").replace(OBJ, "")
+        width = lambda t: sum(ts._w(c) for c in t) * size
+        al = next((pp.find(HH + "align").get("horizontal") for pp in d.reflist("paraProperties")
+                   if pp.get("id") == p.get("paraPrIDRef")), "LEFT")
+        start = {"CENTER": (lw - width(seg)) / 2, "RIGHT": lw - width(seg)}.get(al, 0)
+        cx = x0 + start + width(text[s:a].replace(OBJ, "")) + width(text[a:b]) / 2
+        cy = y0 + lh / 2
+        h_off = cx - W / 2 + mm(float(o.get("dx_mm", 0)))
+        v_off = cy - H / 2 + mm(float(o.get("dy_mm", 0)))
+        anchor, at = p, a
+        if v_off < 0 and lines:
+            # 한컴은 음수 세로 위치를 0으로 자른다(부호 없는 값으로 적어도 — 2026-10-21 실측). 그림이 문단 위로 올라가야 하면
+            # 같은 칸(본문)의 앞 문단에 붙이고 그 문단 첫 줄에서 잰 양수 위치를 준다
+            want = lines[0]["vertpos"] + v_off
+            for q in reversed(list(p.itersiblings(HP + "p", preceding=True))):
+                ql = ts.lines_of(q)
+                if ql and ql[0]["vertpos"] <= want:
+                    anchor, at, v_off = q, len(para_text(q).rstrip("\r\n")), want - ql[0]["vertpos"]
+            if anchor is not p:                   # 앞 문단 기준 가로 위치: 두 문단 첫 줄 시작 차이만큼 옮긴다
+                h_off += lines[0]["horzpos"] - ts.lines_of(anchor)[0]["horzpos"]
+        self._float(pic, o.get("float", "front"), h_off, v_off)
+        where = "" if anchor is p else ", 앞 문단에 붙임"
+        return anchor, at, f"('{o['over']}' 위에 겹침, 가로 {h_off / 283.46:+.1f}mm·세로 {v_off / 283.46:+.1f}mm{where}, 쪽 그림으로 확인)"
 
     # ---- 머리말·꼬리말·쪽 ----
     def _headfoot(self, o, tag):
@@ -2000,7 +2073,7 @@ def _hwp5_outline(path):
                     for tag2, lv2, d2 in recs[i + 1:i + 40]:
                         if tag2 == TABLE and len(d2) >= 8:
                             rows, cols = struct.unpack_from("<HH", d2, 4)
-                        if tag2 == PARA_TEXT and not first:
+                        if tag2 == PARA_TEXT and not first and rows:   # TABLE 앞 문단은 캡션
                             first = hwp5_text(d2)
                         if rows and first:
                             break
