@@ -28,3 +28,4 @@ GitHub Actions(`.github/workflows/test.yml`)가 윈도·리눅스·맥 × Python
 | `test_hwp2hwpx_oracle.py <정답지 폴더> <HWP…>` | HWP → HWPX: 요소·속성 |
 | `test_hwp2hwpx.py <HWP…>` | HWP → HWPX → HWP 왕복 |
 | `test_record_roundtrip.py <HWP…>` | 레코드 코덱 풀기·다시 쓰기 왕복 |
+| `test_read_tables.py` | 읽기 표 구조: 병합 칸 HTML 표·JSON 병합·한 칸 표는 글로·kordoc 고정 판·diff (Node.js가 있을 때 kordoc 항목) |

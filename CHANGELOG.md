@@ -1,5 +1,11 @@
 # 바뀐 것
 
+## 0.1.2 — 2026-10-28
+
+- 읽기 표 구조: 병합 칸·안쪽 표가 있는 표는 Markdown에서 HTML 표(rowspan·colspan)로 쓴다(전에는 병합이 빈 칸으로 풀렸다). 한 칸짜리 겉치레 표는 글로 꺼내고, `--format json`에 `병합`을 넣는다. 공개 문서 53개에서 한컴 저장본의 병합 칸 9,717칸을 모두 보존.
+- kordoc(MIT) 연동: HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림(OCR) 읽기, `read --format chunks`(RAG 청크), `diff`(신구대조), `lint`(공문서 표기법), `redact`(개인정보 마스킹), `render --engine kordoc`(한컴 없는 쪽 그림), `kordoc <명령>`. Node.js 20+가 있을 때.
+- 시험 `test_read_tables.py`.
+
 ## 0.1.1 — 2026-10-21
 
 - 검수: `write`·`edit`가 저장한 뒤 빈 쪽·제목만 있는 쪽·쪽 끝 제목·여백 밖 글·남은 마크다운 기호·깨진 따옴표·바탕 글꼴·서식 없는 표를 보고, 오류면 종료 코드 3. 쪽 그림 폴더를 알려 준다(`hwp_qa.py`).

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """HWP·HWPX를 AI 에이전트가 읽고·고치고·새로 쓰고·바꾸는 명령 하나.
 
-  read <파일> [--format md|text|json] [--engine auto|direct|com] [-o 출력]     내용 읽기(표 유지)
+  read <파일> [--format md|text|json|chunks] [--engine auto|direct|kordoc|com] [-o 출력]   내용 읽기(병합 칸 표는 HTML 표)
+  diff <원본> <새 파일> · lint <파일> · redact <파일…> · kordoc <명령…>   신구대조·표기 검수·개인정보 마스킹(kordoc, MIT)
   outline <파일>                                    본문 문단 번호·표 번호(edit에서 쓰는 번호)
   edit <파일|new> -o <새 파일> --ops ops.json [--op '{...}'] [--engine auto|com|direct] [--check 폴더]
   exam build|check|fix|diff …                       시험지 초안·점검·자동 고침·편집 전후 비교(hwp_exam.py)
@@ -17,13 +18,57 @@ import argparse, html, io, json, os, re, shutil, struct, sys, time, zipfile
 
 # ───────────────────────── 공통 문서 모양: 문단과 표 ─────────────────────────
 # 블록 = ("p", 글) 또는 ("table", [[칸 글, ...], ...])  — 칸 글 안의 줄바꿈은 <br>로 바꿔 Markdown 표에 담는다.
+# 표 값이 Table이면 병합 칸·칸 안 블록(안쪽 표 포함)도 함께 든다: 그런 표는 Markdown에서 HTML 표(rowspan·colspan)로 쓴다
+# (2026-10-26 0032: Markdown 표는 병합을 빈 칸으로 풀어 표 구조를 잃었다 — kordoc은 HTML 표로 보존).
+
+
+class Table(list):
+    """[[칸 글]] 격자 그대로 쓰는 표 블록 값. cells = [(행, 열, 행합침, 열합침, 칸 안 블록)]."""
+    def __init__(self, rows, cells=()):
+        super().__init__(rows)
+        self.cells = list(cells)
+
+    @property
+    def rich(self):
+        """병합 칸이나 안쪽 표가 있어 Markdown 표로는 구조를 못 담는 표인가."""
+        return len(self.cells) <= MAX_CELLS and any(
+            rs > 1 or cs > 1 or any(b[0] == "table" for b in inner) for _, _, rs, cs, inner in self.cells)
+
+    def spans(self):
+        return [[r, c, rs, cs] for r, c, rs, cs, _ in self.cells if rs > 1 or cs > 1]
+
+
+def table_html(t):
+    """병합 칸(rowspan·colspan)과 안쪽 표를 살린 HTML 표. 칸 안 문단은 <br>로 잇는다."""
+    def blocks_html(blocks):
+        parts = []
+        for k, v in blocks:
+            if k == "p":
+                if v.strip():
+                    parts.append(html.escape(v.strip(), quote=False).replace("\n", "<br>"))
+            else:
+                parts.append(table_html(v))
+        return "<br>".join(parts)
+    if not isinstance(t, Table) or not t.cells:
+        t = Table(t, [(r, c, 1, 1, [("p", v)]) for r, row in enumerate(t) for c, v in enumerate(row)])
+    out = ["<table>"]
+    by_row = {}
+    for r, c, rs, cs, inner in sorted(t.cells, key=lambda x: (x[0], x[1])):
+        by_row.setdefault(r, []).append(
+            "<td" + (f' rowspan="{rs}"' if rs > 1 else "") + (f' colspan="{cs}"' if cs > 1 else "") + f">{blocks_html(inner)}</td>")
+    for r in sorted(by_row):
+        out.append("<tr>" + "".join(by_row[r]) + "</tr>")
+    out.append("</table>")
+    return "\n".join(out)
 
 
 def to_markdown(blocks):
     out = []
     for kind, value in blocks:
-        if kind == "p":
+        if kind in ("p", "md"):          # md = kordoc이 읽은 Markdown 그대로
             out.append(value)
+        elif isinstance(value, Table) and value.rich:
+            out += ["", table_html(value), ""]
         else:
             rows = [r for r in value if any(c.strip() for c in r)]
             if not rows:
@@ -44,6 +89,8 @@ def to_text(blocks):
     for kind, value in blocks:
         if kind == "p":
             out.append(value)
+        elif kind == "md":
+            out.append(re.sub(r"<[^>]+>", "", re.sub(r"<br\s*/?>", " ", re.sub(r"</t[dh]>", "\t", value))))
         else:
             out += ["\t".join(c.replace("\n", " ") for c in r) for r in value]
     return "\n".join(out).strip() + "\n"
@@ -209,8 +256,11 @@ def hwpx_table(tbl):
         sub = tc.find(f"{HP}subList")
         for q in (sub.findall(f"{HP}p") if sub is not None else []):
             inner += hwpx_para(q)
-        cells.append((r, c, rs, cs, cell_text(inner)))
-    table = [("table", grid(cells, rows, cols))]
+        cells.append((r, c, rs, cs, inner))
+    if len(cells) == 1:                  # 한 칸짜리 겉치레 표(제목 상자·테두리 틀)는 안의 글·표를 그대로 꺼낸다
+        table = [b for b in cells[0][4] if b[0] != "p" or b[1].strip()]
+    else:
+        table = [("table", Table(grid([(r, c, rs, cs, cell_text(i)) for r, c, rs, cs, i in cells], rows, cols), cells))]
     cap = tbl.find(f"{HP}caption")   # 캡션 글은 HWP 해석과 같게 표 앞(아래 캡션은 뒤) 문단으로
     if cap is None:
         return table
@@ -354,11 +404,54 @@ def read_any(path, engine="auto"):
             errors.append(f"직접 해석 못 하는 형식({ext}, 앞 바이트 {head[:4].hex()})")
         except Exception as e:
             errors.append(f"직접 해석: {e}")
-        if engine == "direct":
+    if engine in ("auto", "direct", "kordoc"):   # HWP 3·PDF·오피스·그림 OCR 등 직접 못 읽는 형식은 kordoc으로
+        try:
+            return read_kordoc(path)
+        except Exception as e:
+            errors.append(f"kordoc: {e}")
+        if engine in ("direct", "kordoc"):
             raise RuntimeError("; ".join(errors))
     if not hancom_installed():
         raise RuntimeError("; ".join(errors + ["한컴오피스가 없어 COM으로도 못 읽음"]))
     return read_com(path)
+
+
+# ───────────────────────── kordoc (MIT, github.com/chrisryugj/kordoc) ─────────────────────────
+# 우리에게 없는 형식(HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림 OCR)과 기능(신구대조·공문 표기 검수·개인정보 마스킹·
+# 한컴 없는 렌더·RAG 청크)은 kordoc을 버전 고정으로 부른다(2026-10-26 0032). 찾는 순서: KORDOC_CLI(cli.js 경로) →
+# ~/.hwp-tool/kordoc-<버전>/node_modules/kordoc/dist/cli.js → npx -y kordoc@<버전>(처음 한 번 npm에서 받음). Node.js 20+ 필요.
+KORDOC_VERSION = "4.24.6"
+
+
+def kordoc_argv():
+    cli = os.environ.get("KORDOC_CLI") or os.path.join(os.path.expanduser("~"), ".hwp-tool", f"kordoc-{KORDOC_VERSION}",
+                                                        "node_modules", "kordoc", "dist", "cli.js")
+    if os.path.exists(cli) and shutil.which("node"):
+        return ["node", cli]
+    npx = shutil.which("npx")
+    if npx:
+        return [npx, "-y", f"kordoc@{KORDOC_VERSION}"]
+    raise RuntimeError("kordoc을 못 찾음: Node.js 20+를 깔고 `npm install --prefix ~/.hwp-tool/kordoc-"
+                       f"{KORDOC_VERSION} kordoc@{KORDOC_VERSION} --omit=optional` (또는 KORDOC_CLI)")
+
+
+def run_kordoc(args, capture=False):
+    import subprocess
+    # 창 없이(0x08000000)는 출력을 받을 때만: 안 받는데 창 없이 띄우면 자식이 콘솔을 잃어 출력이 사라진다
+    return subprocess.run(kordoc_argv() + list(args), capture_output=capture,
+                          creationflags=0x08000000 if os.name == "nt" and capture else 0)
+
+
+def read_kordoc(path, fmt="markdown"):
+    """kordoc으로 읽은 Markdown(또는 chunks JSON)을 블록 하나("md")로."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "out.md")
+        p = run_kordoc([path, "-o", out, "--format", fmt], capture=True)
+        if p.returncode or not os.path.exists(out):
+            raise RuntimeError((p.stderr or b"").decode("utf-8", "replace").strip()[-300:] or f"종료 코드 {p.returncode}")
+        text = open(out, encoding="utf-8", errors="replace").read()
+    return [("md", text)], {"형식": f"kordoc {KORDOC_VERSION} ({os.path.splitext(path)[1].lower() or '?'})"}
 
 
 # ───────────────────────── Markdown → HTML (쓰기용) ─────────────────────────
@@ -418,9 +511,14 @@ def emit(text, out):
 
 def cmd_read(a):
     t = time.time()
+    if a.format == "chunks":
+        blocks, info = read_kordoc(a.file, "chunks")
+        emit(blocks[0][1], a.output)
+        return
     blocks, info = read_any(a.file, a.engine)
     if a.format == "json":
-        emit(json.dumps({"정보": info, "블록": [{"종류": k, "값": v} for k, v in blocks]}, ensure_ascii=False, indent=1), a.output)
+        emit(json.dumps({"정보": info, "블록": [{"종류": k, "값": v, **({"병합": v.spans()} if isinstance(v, Table) and v.spans() else {})}
+                                                for k, v in blocks]}, ensure_ascii=False, indent=1), a.output)
     else:
         emit(to_markdown(blocks) if a.format == "md" else to_text(blocks), a.output)
     print(f"{info.get('형식')} · 문단 {sum(1 for k, _ in blocks if k == 'p')} · 표 {sum(1 for k, _ in blocks if k == 'table')} · {time.time() - t:.2f}초",
@@ -556,162 +654,6 @@ def run_qa(a, strict):
         print(f"검수에 걸렸습니다 — 위 오류를 고치고 쪽 그림을 확인한 뒤 넘기세요(파일은 저장됨: {a.output}). "
               "검수를 건너뛰려면 --no-check", file=sys.stderr)
         sys.exit(3)
-
-
-def loose_lines(d):
-    """양쪽 정렬·어절 줄 나눔 문단에서 띄어쓰기가 벌어진 줄 수 → {문단 번호: 줄 수}.
-    줄마다 (글자 폭 합 / 줄 폭)을 재서, 같은 문단에서 가장 꽉 찬 줄의 90%에 못 미치면 벌어진 줄로 본다(마지막 줄 제외)."""
-    import hwp_typeset as ts
-    import hwpx_direct as X
-    just = {pr.get("id") for pr in d.header.iter(X.HH + "paraPr")
-            if pr.find(X.HH + "align") is not None and pr.find(X.HH + "align").get("horizontal") == "JUSTIFY"}
-    out = {}
-    for i, p in enumerate(d.all_paras()):
-        if p.get("paraPrIDRef") not in just or not ts.word_wrapped(d, p):
-            continue
-        t, ls = ts.plain_text(p), ts.lines_of(p)
-        if not t or len(ls) < 3:
-            continue
-        fills = [sum(ts._w(c) for c in t[a["textpos"]:b["textpos"]].strip()) / max(1, a["horzsize"]) for a, b in zip(ls, ls[1:])]
-        n = sum(1 for f in fills if f < 0.9 * max(fills))
-        if n:
-            out[i] = n
-    return out
-
-
-def lonely_headers(d):
-    """쪽을 넘는(자리 차지) 표 가운데, 표를 담은 문단의 쪽 안 위치 + 머리 줄 + 첫 줄 묶음(첫 칸 세로 합침만큼) 높이가
-    본문 높이를 넘는 표는 그 문단에 쪽 나눔을 건다. 고친 표 수를 돌려준다."""
-    import hwp_typeset as ts
-    import hwpx_direct as X
-    pr = d.secprs()[0].find(X.HP + "pagePr")
-    m = pr.find(X.HP + "margin")
-    body_h = int(pr.get("height")) - sum(int(m.get(k)) for k in ("top", "bottom", "header", "footer"))
-
-    def cell_h(tc):                      # 칸 높이 = 칸 안 마지막 줄 끝 + 칸 위아래 여백(저장된 cellSz 높이는 최솟값일 수 있다)
-        end = 0
-        for q in tc.iter(X.HP + "p"):
-            for ln in ts.lines_of(q):
-                end = max(end, ln["vertpos"] + ln["vertsize"])
-        mg = tc.find(X.HP + "cellMargin")
-        pad = int(mg.get("top", 0)) + int(mg.get("bottom", 0)) if mg is not None else 282
-        return max(int(tc.find(X.HP + "cellSz").get("height")), end + pad)
-    n = 0
-    for p in d.body():
-        tbl = p.find(f"{X.HP}run/{X.HP}tbl")
-        if tbl is None or tbl.find(X.HP + "pos").get("treatAsChar") != "0" or p.get("pageBreak") == "1":
-            continue
-        rows = tbl.findall(X.HP + "tr")
-        if len(rows) < 2 or rows[0].find(X.HP + "tc").get("header") != "1":
-            continue
-        ls = ts.lines_of(p)
-        if not ls:
-            continue
-        h = [max(cell_h(tc) for tc in r.findall(X.HP + "tc")) for r in rows]
-        span = int(rows[1].find(X.HP + "tc").find(X.HP + "cellSpan").get("rowSpan", "1"))
-        if ls[0]["vertpos"] > 0 and ls[0]["vertpos"] + sum(h[:1 + span]) > body_h:
-            p.set("pageBreak", "1")
-            d.touch(p)
-            n += 1
-    return n
-
-
-def polish_layout(src, out):
-    """한컴(숨긴 데스크톱)으로 줄 배치를 잰 뒤, 줄 끝에서 낱말이 잘린 문단만 문단 전체의 자간·장평을 조금씩 줄여
-    낱말이 한 줄에 들어가게 한다. 잘림이 없는 문단은 건드리지 않는다. out은 .hwp·.hwpx 모두."""
-    import tempfile
-    import hwp_typeset as ts
-    import hwpx_direct as X
-    from hwp_com import Session
-    # 단계: (자간 더하기 %, 장평 %) — 본문은 4단계(자간 -5·장평 97)까지, 표 칸은 끝까지
-    steps = [(0, 100), (-2, 100), (-4, 100), (-5, 98), (-5, 96), (-6, 94), (-6, 92)]
-    body_max = 4
-    work = tempfile.mkdtemp(prefix="hwppolish_")
-    base, cur = os.path.join(work, "laid.hwpx"), os.path.join(work, "cur.hwpx")
-    level = {}
-    with Session() as hwp:
-        ts.relayout(hwp, src, base)
-        cur_src = base
-        for rnd in range(len(steps)):
-            d = X.Hwpx(cur_src)
-            paras = d.all_paras()
-            _, where = ts.count_breaks(d, list(range(len(paras))))
-            split = sorted({w[0] for w in where if w[1] == "split"})
-            print(f"자간·장평 {rnd}바퀴: 낱말 잘림 문단 {len(split)}개", file=sys.stderr)
-            bumped = False
-            for i in split:
-                cap = len(steps) - 1 if any(a.tag == X.HP + "tc" for a in paras[i].iterancestors()) else body_max
-                if level.get(i, 0) < cap:
-                    level[i] = level.get(i, 0) + 1
-                    bumped = True
-            if not bumped:
-                break
-            d = X.Hwpx(base)                     # 매 바퀴 원본에 다시 입힌다(겹쳐 줄지 않게)
-            paras = d.all_paras()
-            for i, lv in level.items():
-                sp, ratio = steps[lv]
-                for run in paras[i].findall(X.HP + "run"):
-                    run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
-                d.touch(paras[i])
-            tmp = os.path.join(work, f"r{rnd}.hwpx")
-            d.save(tmp)
-            ts.relayout(hwp, tmp, cur)
-            cur_src = cur
-        # 띄어쓰기가 벌어진 줄(양쪽 정렬에서 다음 어절이 안 들어가 빈칸이 늘어난 줄): 그 문단 자간을 조금씩 줄여
-        # 벌어진 줄이 가장 적은 값을 고른다. 낱말 잘림을 맞춘 문단은 건드리지 않는다.
-        loose_base = os.path.join(work, "loose_base.hwpx")
-        shutil.copy(cur_src, loose_base)
-        d = X.Hwpx(loose_base)
-        best = {i: (n, 0) for i, n in loose_lines(d).items() if i not in level}
-        tried = 0
-        for sp, ratio in ((-2, 100), (-4, 100), (-6, 100), (-5, 97), (-6, 95)):
-            if not any(n for n, _ in best.values()):
-                break
-            d = X.Hwpx(loose_base)
-            paras = d.all_paras()
-            for i, (n, _) in best.items():
-                if n:
-                    for run in paras[i].findall(X.HP + "run"):
-                        run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
-                    d.touch(paras[i])
-            tmp, laid2 = os.path.join(work, f"l{sp}.hwpx"), os.path.join(work, f"l{sp}_laid.hwpx")
-            d.save(tmp)
-            ts.relayout(hwp, tmp, laid2)
-            now = loose_lines(X.Hwpx(laid2))
-            for i, (n, v) in list(best.items()):
-                if n and now.get(i, 0) < n:
-                    best[i] = (now.get(i, 0), (sp, ratio))
-            tried += 1
-        fixed = {i: v for i, (n, v) in best.items() if v}
-        print(f"벌어진 줄: 문단 {len(best)}개 중 {len(fixed)}개 자간·장평 조정, 남은 벌어진 줄 {sum(n for n, _ in best.values())}",
-              file=sys.stderr)
-        if fixed:
-            d = X.Hwpx(loose_base)
-            paras = d.all_paras()
-            for i, (sp, ratio) in fixed.items():
-                for run in paras[i].findall(X.HP + "run"):
-                    run.set("charPrIDRef", d.charpr(run.get("charPrIDRef", "0"), {"spacing_add": sp, "ratio": ratio}))
-                d.touch(paras[i])
-            tmp = os.path.join(work, "loose.hwpx")
-            d.save(tmp)
-            cur_src = os.path.join(work, "loose_laid.hwpx")
-            ts.relayout(hwp, tmp, cur_src)
-        # 쪽 끝에 표 머리 줄만 남는 표(머리 줄 + 첫 줄 묶음이 남은 자리에 안 들어감)는 다음 쪽에서 시작한다
-        d = X.Hwpx(cur_src)
-        moved = lonely_headers(d)
-        if moved:
-            tmp = os.path.join(work, "head.hwpx")
-            d.save(tmp)
-            cur_src = os.path.join(work, "head_laid.hwpx")
-            ts.relayout(hwp, tmp, cur_src)
-            print(f"머리 줄만 남던 표 {moved}개를 다음 쪽으로", file=sys.stderr)
-        if not hwp.Open(os.path.abspath(cur_src), "", ts.OPEN_OPT):
-            raise RuntimeError("한컴이 다듬은 파일을 열지 못함")
-        pages = hwp.PageCount
-        if not hwp.SaveAs(os.path.abspath(out), "HWP" if out.lower().endswith(".hwp") else "HWPX", ""):
-            raise RuntimeError(f"저장하지 못함(다른 프로그램에서 열려 있는지 확인): {out}")
-        hwp.Clear(1)
-    print(f"다듬기: 조정한 문단 {len(level)} · 남은 잘림 문단 {len(split)} · {pages}쪽", file=sys.stderr)
 
 
 def loose_lines(d):
@@ -1033,6 +975,9 @@ def check_report(src, out, folder):
 
 
 def cmd_render(a):
+    if a.engine == "kordoc" or (a.engine == "auto" and not hancom_installed()):   # 한컴 없이: kordoc 조판(PNG)
+        os.makedirs(a.output, exist_ok=True)
+        sys.exit(run_kordoc(["render", a.file, "--format", "png", "-d", a.output] + (["--pages", a.pages] if a.pages else [])).returncode)
     import hwp_check
     pages = None
     if a.pages:
@@ -1040,6 +985,14 @@ def cmd_render(a):
         pages = set(range(int(lo), int(hi or lo) + 1))
     for p in hwp_check.render(a.file, a.output, a.dpi, pages):
         print(p)
+
+
+def cmd_kordoc_pass(a):
+    """diff(kordoc compare: 블록·칸 단위 신구대조) · lint(공문서 표기·공공언어 검수) · redact(개인정보 서식 보존 마스킹) ·
+    kordoc(그 밖의 kordoc 명령 그대로: generate·patch·seal·tables·crop·profile·levels·validate …). 종료 코드도 kordoc 것."""
+    sub = {"diff": "compare"}.get(a.cmd, a.cmd)
+    args = ([] if a.cmd == "kordoc" else [sub]) + a.args
+    sys.exit(run_kordoc(args).returncode)
 
 
 def cmd_compare(a):
@@ -1080,7 +1033,9 @@ def cmd_actions(a):
 
 def may_use_hancom(a):
     """이 명령이 한컴(COM)을 띄울 수 있으면 True. 한컴이 없거나 직접 경로로 끝나는 명령은 False."""
-    if a.cmd in ("actions", "outline") or not hancom_installed():
+    if a.cmd in ("actions", "outline", "diff", "lint", "redact", "kordoc") or not hancom_installed():
+        return False
+    if a.cmd == "render" and a.engine == "kordoc":
         return False
     if a.cmd == "write":                # 줄 배치 다듬기·검수 쪽 그림은 한컴을 쓴다
         return not (a.no_polish and a.no_check) or a.engine == "com" or \
@@ -1102,10 +1057,13 @@ def main():
             hwp_hidden.reexec_hidden()
         import hwp_exam
         sys.exit(hwp_exam.main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] in ("diff", "lint", "redact", "kordoc"):   # kordoc에 인자를 그대로(argparse를 거치지 않게)
+        cmd_kordoc_pass(argparse.Namespace(cmd=sys.argv[1], args=sys.argv[2:]))
     ap = argparse.ArgumentParser(description="HWP·HWPX 읽기·쓰기·고치기·변환")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("read"); p.add_argument("file"); p.add_argument("--format", choices=["md", "text", "json"], default="md")
-    p.add_argument("--engine", choices=["auto", "direct", "com"], default="auto"); p.add_argument("-o", "--output")
+    p = sub.add_parser("read"); p.add_argument("file")
+    p.add_argument("--format", choices=["md", "text", "json", "chunks"], default="md", help="chunks = RAG용 구조 청크 JSON(kordoc)")
+    p.add_argument("--engine", choices=["auto", "direct", "kordoc", "com"], default="auto"); p.add_argument("-o", "--output")
     p = sub.add_parser("info"); p.add_argument("file"); p.add_argument("--pages", action="store_true", help="한컴으로 쪽수도")
     p = sub.add_parser("replace"); p.add_argument("file"); p.add_argument("--find", action="append", required=True)
     p.add_argument("--to", action="append", required=True); p.add_argument("-o", "--output", required=True)
@@ -1136,6 +1094,12 @@ def main():
                    help="직접 경로 결과의 줄 배치: auto=한컴이 있으면 한컴으로 다시 짜서 써 둠, none=줄 배치 없이 둠")
     p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--dpi", type=int, default=80); p.add_argument("--pages", help="예: 1-3")
+    p.add_argument("--engine", choices=["auto", "hancom", "kordoc"], default="auto", help="auto = 한컴이 있으면 한컴, 없으면 kordoc 조판")
+    for name, h in (("diff", "두 문서 글 비교(신구대조, 블록·칸 단위, HWP↔HWPX 섞어도 됨) — kordoc compare 인자 그대로"),
+                    ("lint", "공문서 표기법·공공언어 검수 — kordoc lint 인자 그대로"),
+                    ("redact", "개인정보 서식 보존 마스킹(사람이 꼭 다시 확인) — kordoc redact 인자 그대로"),
+                    ("kordoc", "그 밖의 kordoc 명령 그대로(generate·patch·seal·tables·crop·profile·levels·validate …)")):
+        p = sub.add_parser(name, help=h, add_help=False); p.add_argument("args", nargs=argparse.REMAINDER)
     p = sub.add_parser("compare"); p.add_argument("file"); p.add_argument("other"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--dpi", type=int, default=70)
     p = sub.add_parser("check"); p.add_argument("file"); p.add_argument("--roundtrip", metavar="폴더")
@@ -1148,7 +1112,8 @@ def main():
     {"read": cmd_read, "info": cmd_info, "replace": cmd_replace, "fields": cmd_fields, "fill": cmd_fill,
      "export-json": cmd_export_json, "import-json": cmd_import_json, "write": cmd_write, "convert": cmd_convert,
      "edit": cmd_edit, "render": cmd_render, "compare": cmd_compare, "check": cmd_check, "outline": cmd_outline,
-     "actions": cmd_actions}[a.cmd](a)
+     "actions": cmd_actions, "diff": cmd_kordoc_pass, "lint": cmd_kordoc_pass, "redact": cmd_kordoc_pass,
+     "kordoc": cmd_kordoc_pass}[a.cmd](a)
 
 
 if __name__ == "__main__":

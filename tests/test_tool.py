@@ -74,7 +74,9 @@ class DirectHwpx(unittest.TestCase):
 
     def test_read_markdown_keeps_table(self):
         md = cli("read", os.path.join(FIX, "sample.hwpx"))
-        self.assertIn("| 항목 | 값 | 비고 |", md)
+        # the sample table merges its last row ("합계" + colspan 2), so it is written as an HTML table (0.1.2)
+        self.assertIn("<td>항목</td><td>값</td><td>비고</td>", md)
+        self.assertIn('<td>합계</td><td colspan="2">8</td>', md)
         self.assertIn("표 아래 문단입니다.", md)
 
     def test_table_ops(self):
@@ -114,7 +116,7 @@ class HwpRead(unittest.TestCase):
 
     def test_read(self):
         out = cli("read", self.hwp)
-        for s in ("예시 문서", "| 사과 | 3 | 빨강 |", "표 아래 문단입니다."):
+        for s in ("예시 문서", "<td>사과</td><td>3</td><td>빨강</td>", '<td colspan="2">8</td>', "표 아래 문단입니다."):
             self.assertIn(s, out)
 
     def test_record_codec_round_trip(self):

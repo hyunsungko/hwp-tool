@@ -15,10 +15,12 @@ Read, edit, create and convert Korean HWP/HWPX documents — from Claude Code or
 | Markdown → 보고서 모양 한글 문서 | `write 글.md -o 보고서.hwp --engine direct` | 아니오 (.hwp 쓰기는 윈도) |
 | Markdown → 2단 논문 모양 | `write 글.md -o 논문.hwp --engine direct --style paper` | 아니오 |
 | 줄 끝 낱말 잘림 다듬기 | `write … --polish` | 예 |
-| 내용 읽기 (Markdown, 표 유지) | `read 파일.hwp` | 아니오 |
+| 내용 읽기 (Markdown, 표 유지 — 병합 칸·안쪽 표는 HTML 표) | `read 파일.hwp` | 아니오 |
+| HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림(OCR) 읽기, RAG용 청크(`--format chunks`) | `read 파일.pdf` | 아니오 (Node.js 20+, kordoc) |
+| 두 문서 글 비교(신구대조) · 공문서 표기법 검수 · 개인정보 마스킹 | `diff`·`lint`·`redact` | 아니오 (Node.js 20+, kordoc) |
 | 고치기·새로 쓰기 (글자·문단·표·그림·머리말·쪽 번호·각주·누름틀 등) | `edit 파일 -o 새파일 --ops ops.json` | HWPX는 아니오 |
 | HWP ↔ HWPX 변환 | `convert 파일.hwp -o 파일.hwpx` | 아니오 (HWPX → HWP는 윈도) |
-| PDF·DOCX 등으로 변환, 쪽 그림, 두 문서 비교 | `convert`·`render`·`compare` | 예 |
+| PDF·DOCX 등으로 변환, 쪽 그림, 두 문서 비교 | `convert`·`render`·`compare` | 예 (`render`는 한컴이 없으면 kordoc 조판) |
 | 시험지 조판·점검 | `exam build`·`exam check` | 예 |
 
 명령과 ops 목록 전체: [skills/hwp-tool/SKILL.md](skills/hwp-tool/SKILL.md), [reference/ops.md](skills/hwp-tool/reference/ops.md)
@@ -62,6 +64,12 @@ python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_report.md -o re
 
 필요: Python 3.10 이상, `lxml`, `olefile`, `pillow`. 윈도에서 HWP 파일을 쓰거나 한컴 경로를 쓰려면 `pywin32`도 필요합니다.
 
+선택: HWP·HWPX 밖의 형식(HWP 3·PDF·오피스·그림)과 `diff`·`lint`·`redact`는 [kordoc](https://github.com/chrisryugj/kordoc)(MIT)을 버전을 고정해 부릅니다. Node.js 20 이상이 있으면 처음 쓸 때 `npx`가 kordoc 4.24.6을 받습니다. 미리 깔아 두려면:
+
+```
+npm install --prefix ~/.hwp-tool/kordoc-4.24.6 kordoc@4.24.6
+```
+
 ## 한컴오피스가 있을 때: 창을 띄우지 않습니다
 
 쪽 그림, PDF·DOCX 변환, 누름틀, `--polish`처럼 한컴이 필요한 일은 PC에 설치된 한컴오피스를 COM으로 부릅니다. 이때 도구가 **숨긴 데스크톱**을 따로 만들어 그 안에서 한글을 띄웁니다. 그래서 사용자 화면에 한글 창·대화상자·트레이 아이콘이 뜨지 않고, 작업 중인 창의 포커스와 키보드 입력도 빼앗지 않습니다. 끝나면 도구가 띄운 한글 프로세스만 닫습니다.
@@ -80,6 +88,6 @@ python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_report.md -o re
 
 ## 라이선스
 
-MIT. 함께 쓰는 꾸러미와 그 라이선스: [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). 이 저장소에는 외부 코드와 한컴 프로그램·형식 문서를 넣지 않았습니다.
+MIT. 함께 쓰는 꾸러미와 그 라이선스(kordoc 포함): [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). 이 저장소에는 외부 코드와 한컴 프로그램·형식 문서를 넣지 않았습니다.
 
 "한글", "한컴오피스"는 한글과컴퓨터의 상표입니다. 이 프로젝트는 한글과컴퓨터와 관계가 없습니다.

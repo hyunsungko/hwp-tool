@@ -19,6 +19,16 @@
 | [hwp2hwpx-python-refactor](https://github.com/jkf87/hwp2hwpx-python-refactor) | Apache-2.0 | 쓰려면 `skills/hwp-tool/scripts/vendor/hwp2hwpx/`에 직접 받는다 |
 | pyhwp (`hwp5`, 위 변환기가 씀) | AGPL-3.0-or-later | 그래서 묶어 배포하지 않고 선택 설치로 둔다 |
 
+## 선택: kordoc (Node.js)
+
+HWP·HWPX 밖의 형식(HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림 OCR)과 `diff`·`lint`·`redact`·`render --engine kordoc`·`read --format chunks`는 kordoc을 따로 실행해 부른다. 코드를 이 저장소에 넣지 않았고, 버전은 4.24.6으로 고정한다(`KORDOC_CLI` → `~/.hwp-tool/kordoc-4.24.6/` → `npx -y kordoc@4.24.6` 순으로 찾는다).
+
+| 꾸러미 | 라이선스 | 비고 |
+|---|---|---|
+| [kordoc](https://github.com/chrisryugj/kordoc) 4.24.6 | MIT (Copyright 2026 chrisryugj) | Node.js 20+. 함께 쓰는 꾸러미의 라이선스는 kordoc의 `NOTICE`·`THIRD_PARTY/` |
+
+kordoc은 OCR·수식 인식을 켤 때(`--ocr`·`--formula-ocr`)만 처음 한 번 Hugging Face에서 모델을 받는다. 그 밖에는 바깥으로 보내는 것이 없다.
+
 ## 한컴오피스
 
 한컴 경로(쪽 그림, PDF·DOCX 변환, 누름틀, 한컴 액션, 시험지 조판)는 사용자 PC에 설치된 한컴오피스를 COM으로 부른다. 한컴 프로그램이나 그 파일은 이 저장소에 들어 있지 않다.
