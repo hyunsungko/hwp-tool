@@ -1,6 +1,6 @@
 {
   "name": "hwp-tool",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Read (merged-cell tables kept; HWP 3, PDF, Office and OCR via kordoc), edit, create and convert Korean HWP/HWPX documents from Claude: Markdown to report-style HWP, character and paragraph formatting, tables, headers, page numbers, footnotes, fields, merges, and exam-sheet layout. Works without Hancom Office for HWPX; when Hancom is installed it runs on a hidden desktop with no window on screen.",
   "author": {
     "name": "hyunsungko",

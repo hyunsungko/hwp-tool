@@ -302,6 +302,80 @@ def com_save(hwp, out):
         raise RuntimeError(f"저장 실패({fmt}): {out}")
 
 
+def html_inline(path):
+    """한컴이 따로 쓴 스타일(.css)과 그림을 HTML 안에 넣는다(<style>, data URI). 넣은 원본 파일 목록을 돌려준다."""
+    import base64
+    folder = os.path.dirname(os.path.abspath(path))
+    raw = open(path, "rb").read()
+    euckr = re.search(rb"charset=(euc-kr|ks_c_5601-1987)", raw[:4000], re.I)   # 한컴 「HTML」은 EUC-KR, 「HTML+」는 UTF-8
+    text = raw.decode("cp949" if euckr else "utf-8", errors="replace").lstrip("﻿")
+    if euckr:
+        text = re.sub(r"charset=(euc-kr|ks_c_5601-1987)", "charset=utf-8", text, flags=re.I)
+    used = []
+
+    def local(name):
+        name = html.unescape(name)
+        if name.lower().startswith("file:///"):   # 「HTML」은 그림을 절대 경로로 건다
+            name = name[8:]
+        return name if os.path.isabs(name) else os.path.join(folder, name)
+
+    def css(m):
+        f = local(m.group(1))
+        if not os.path.exists(f):
+            return m.group(0)
+        used.append(f)
+        return "<style>" + open(f, "rb").read().decode("utf-8", errors="replace").lstrip("﻿") + "</style>"
+
+    def img(m):
+        f = local(m.group(2))
+        if not os.path.exists(f):
+            return m.group(0)
+        used.append(f)
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".bmp": "image/bmp"}.get(os.path.splitext(f)[1].lower(), "image/png")
+        q = "'" if m.group(1).startswith("url") else '"'   # url(…)은 style="…" 안에 있어 작은따옴표로
+        return f'{m.group(1)}{q}data:{mime};base64,{base64.b64encode(open(f, "rb").read()).decode()}{q}'
+
+    text = re.sub(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>', css, text)
+    text = re.sub(r'''((?:src=|url\())["']?([^"')]+\.(?:png|jpg|jpeg|gif|bmp))["']?''', img, text, flags=re.I)
+    if "<meta charset" not in text.lower():
+        text = text.replace("<head>", '<head><meta charset="utf-8">', 1)
+    open(path, "w", encoding="utf-8").write(text)
+    return used
+
+
+def com_save_html(src, out, single_file=False, plus=False):
+    """한컴으로 HTML 저장. 「HTML」이 실패하면(2단·머리말 그림이 있는 문서에서 한컴 2024가 멈추는 일이 있다) 「HTML+」로 다시 저장한다.
+    「HTML」은 글 흐름만 남아 표 양식 순서가 흐트러질 수 있다. 「HTML+」(plus)는 쪽·단·머리말을 줄 위치 그대로 그린다.
+    single_file이면 스타일·그림을 HTML 안에 넣어 한 파일로."""
+    import tempfile
+    work = tempfile.mkdtemp(prefix="hwp_html_") if single_file else os.path.dirname(os.path.abspath(out)) or "."
+    target = os.path.join(work, "page.html") if single_file else os.path.abspath(out)
+    used = "HTML"
+    try:
+        if plus:
+            raise RuntimeError("--plus")
+        with Hancom() as hwp:
+            com_open(hwp, src)
+            if not hwp.SaveAs(target, "HTML", ""):
+                raise RuntimeError("HTML 저장 실패")
+            pages = hwp.PageCount
+    except Exception as e:
+        if not plus:
+            print(f"한컴 「HTML」 저장 실패({str(e)[:80]}) → 「HTML+」로 다시 저장", file=sys.stderr)
+        used = "HTML+"
+        with Hancom() as hwp:
+            com_open(hwp, src)
+            if not hwp.SaveAs(target, "HTML+", ""):
+                raise RuntimeError("한컴 HTML+ 저장도 실패: " + out)
+            pages = hwp.PageCount
+    if single_file:
+        html_inline(target)
+        os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+        shutil.copyfile(target, out)
+        shutil.rmtree(work, ignore_errors=True)   # 이 명령이 만든 임시 폴더
+    print(f"쪽수 {pages}, 형식 {used}{' · 한 파일' if single_file else ''}, 저장: {out}", file=sys.stderr)
+
+
 def hml_blocks(xml):
     """한컴 HWPML 2.x(GetTextFile('HWPML2X'))의 BODY → 문단과 표."""
     from lxml import etree
@@ -427,6 +501,8 @@ def kordoc_argv():
     cli = os.environ.get("KORDOC_CLI") or os.path.join(os.path.expanduser("~"), ".hwp-tool", f"kordoc-{KORDOC_VERSION}",
                                                         "node_modules", "kordoc", "dist", "cli.js")
     if os.path.exists(cli) and shutil.which("node"):
+        import kordoc_patch   # 고정판 render 덧댐. 무엇을 왜 고치는지는 그 파일 머리에
+        kordoc_patch.apply(os.path.dirname(cli))
         return ["node", cli]
     npx = shutil.which("npx")
     if npx:
@@ -836,8 +912,17 @@ def cmd_convert(a):
             print("변환 경고:", w, file=sys.stderr)
         print(f"직접 경로(hwp5_to_hwpx) · 저장: {a.output}", file=sys.stderr)
         return
+    if ext in (".html", ".htm") and a.engine != "com":   # HTML은 한컴이 있어도 직접 경로가 기본, 한컴 HTML+는 --engine com
+        # 쪽 그대로 그리기 = kordoc render(한컴 저장본은 줄 배치 그대로, 없으면 kordoc이 조판). 늘 한 파일(SVG 쪽)
+        p = run_kordoc(["render", a.file, "--format", "html", "-o", a.output], capture=True)
+        if p.returncode or not os.path.exists(a.output):
+            sys.exit("kordoc render 실패: " + (p.stderr or b"").decode("utf-8", "replace").strip()[-300:])
+        print(f"직접 경로(kordoc render) · 저장: {a.output}", file=sys.stderr)
+        return
     if direct:
-        sys.exit("한컴 없이 되는 변환은 HWPX ↔ HWP·Markdown입니다(PDF·DOCX 등은 한컴 경로)")
+        sys.exit("한컴 없이 되는 변환은 HWPX ↔ HWP·Markdown·HTML입니다(PDF·DOCX 등은 한컴 경로)")
+    if ext in (".html", ".htm"):
+        return com_save_html(a.file, a.output, a.single_file, a.plus)
     with Hancom() as hwp:
         com_open(hwp, a.file)
         com_save(hwp, a.output)
@@ -987,11 +1072,16 @@ def cmd_render(a):
         print(p)
 
 
+def cmd_diff(a):
+    import hwp_diff
+    res = hwp_diff.diff(read_any(a.file)[0], read_any(a.other)[0])
+    emit(json.dumps(res, ensure_ascii=False, indent=1) if a.json else hwp_diff.to_text(res) + "\n", a.output)
+
+
 def cmd_kordoc_pass(a):
-    """diff(kordoc compare: 블록·칸 단위 신구대조) · lint(공문서 표기·공공언어 검수) · redact(개인정보 서식 보존 마스킹) ·
+    """lint(공문서 표기·공공언어 검수) · redact(개인정보 서식 보존 마스킹) ·
     kordoc(그 밖의 kordoc 명령 그대로: generate·patch·seal·tables·crop·profile·levels·validate …). 종료 코드도 kordoc 것."""
-    sub = {"diff": "compare"}.get(a.cmd, a.cmd)
-    args = ([] if a.cmd == "kordoc" else [sub]) + a.args
+    args = ([] if a.cmd == "kordoc" else [a.cmd]) + a.args
     sys.exit(run_kordoc(args).returncode)
 
 
@@ -1057,7 +1147,7 @@ def main():
             hwp_hidden.reexec_hidden()
         import hwp_exam
         sys.exit(hwp_exam.main(sys.argv[2:]))
-    if len(sys.argv) > 1 and sys.argv[1] in ("diff", "lint", "redact", "kordoc"):   # kordoc에 인자를 그대로(argparse를 거치지 않게)
+    if len(sys.argv) > 1 and sys.argv[1] in ("lint", "redact", "kordoc"):   # kordoc에 인자를 그대로(argparse를 거치지 않게)
         cmd_kordoc_pass(argparse.Namespace(cmd=sys.argv[1], args=sys.argv[2:]))
     ap = argparse.ArgumentParser(description="HWP·HWPX 읽기·쓰기·고치기·변환")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1083,6 +1173,8 @@ def main():
     p = sub.add_parser("convert"); p.add_argument("file"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--engine", choices=["auto", "com", "direct"], default="auto",
                    help="direct = 한컴 없이(HWPX ↔ HWP는 우리 변환기 hwpx2hwp·hwp5_to_hwpx). auto = 한컴이 있으면 한컴")
+    p.add_argument("--single-file", action="store_true", help=".html --engine com: 스타일·그림을 HTML 안에 넣어 한 파일로(직접 경로는 늘 한 파일)")
+    p.add_argument("--plus", action="store_true", help=".html --engine com: 처음부터 한컴 「HTML+」(쪽·단·머리말을 인쇄본 위치 그대로)")
     p = sub.add_parser("edit", help="ops(JSON) 차례로 적용: 글자·문단·스타일·표·그림·머리말·쪽·누름틀·각주·목록·바꾸기·합치기")
     p.add_argument("file", help="고칠 파일, 새 문서면 new"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--ops", help="ops JSON 파일([{...}, ...])"); p.add_argument("--op", action="append", help="ops 하나(JSON 글)")
@@ -1095,8 +1187,9 @@ def main():
     p = sub.add_parser("render"); p.add_argument("file"); p.add_argument("-o", "--output", required=True)
     p.add_argument("--dpi", type=int, default=80); p.add_argument("--pages", help="예: 1-3")
     p.add_argument("--engine", choices=["auto", "hancom", "kordoc"], default="auto", help="auto = 한컴이 있으면 한컴, 없으면 kordoc 조판")
-    for name, h in (("diff", "두 문서 글 비교(신구대조, 블록·칸 단위, HWP↔HWPX 섞어도 됨) — kordoc compare 인자 그대로"),
-                    ("lint", "공문서 표기법·공공언어 검수 — kordoc lint 인자 그대로"),
+    p = sub.add_parser("diff", help="두 문서 글 비교(문단·표 칸 단위, 빈칸 뺀 글자로 맞대 띄어쓰기만 다른 곳은 따로 셈, HWP↔HWPX 섞어도 됨). kordoc 것은 `kordoc compare`")
+    p.add_argument("file"); p.add_argument("other"); p.add_argument("--json", action="store_true"); p.add_argument("-o", "--output")
+    for name, h in (("lint", "공문서 표기법·공공언어 검수 — kordoc lint 인자 그대로"),
                     ("redact", "개인정보 서식 보존 마스킹(사람이 꼭 다시 확인) — kordoc redact 인자 그대로"),
                     ("kordoc", "그 밖의 kordoc 명령 그대로(generate·patch·seal·tables·crop·profile·levels·validate …)")):
         p = sub.add_parser(name, help=h, add_help=False); p.add_argument("args", nargs=argparse.REMAINDER)
@@ -1112,7 +1205,7 @@ def main():
     {"read": cmd_read, "info": cmd_info, "replace": cmd_replace, "fields": cmd_fields, "fill": cmd_fill,
      "export-json": cmd_export_json, "import-json": cmd_import_json, "write": cmd_write, "convert": cmd_convert,
      "edit": cmd_edit, "render": cmd_render, "compare": cmd_compare, "check": cmd_check, "outline": cmd_outline,
-     "actions": cmd_actions, "diff": cmd_kordoc_pass, "lint": cmd_kordoc_pass, "redact": cmd_kordoc_pass,
+     "actions": cmd_actions, "diff": cmd_diff, "lint": cmd_kordoc_pass, "redact": cmd_kordoc_pass,
      "kordoc": cmd_kordoc_pass}[a.cmd](a)
 
 

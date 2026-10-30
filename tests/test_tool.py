@@ -178,5 +178,17 @@ class Exam(unittest.TestCase):
         self.assertTrue(os.path.getsize(out) > 1000)
 
 
+class TextDiff(unittest.TestCase):
+    def test_spacing_and_table_cells(self):
+        import hwp_diff
+        a = [("p", "양측은 다음과 같이 합의하였다."), ("table", [["항목", "값"], ["기간", "3개월"]])]
+        b = [("p", "양측은 다음과 같이 합의 하였다."), ("table", [["항목", "값"], ["기간", "6개월"]])]
+        res = hwp_diff.diff(a, b)
+        self.assertEqual(res["요약"]["띄어쓰기만"], 1)
+        self.assertEqual(res["요약"]["바뀜"], 1)
+        change = res["바뀜"][0]
+        self.assertEqual((change["앞 자리"], change["앞"], change["뒤"]), ("표1 2행 2칸", "3개월", "6개월"))
+
+
 if __name__ == "__main__":
     unittest.main()

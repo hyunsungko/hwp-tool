@@ -24,7 +24,8 @@ description: "HWP·HWPX(한글 문서)를 읽고·고치고·새로 쓰고·바�
 | 하고 싶은 일 | 명령 | 한컴 필요 |
 |---|---|---|
 | 내용 읽기(Markdown, 표 유지) | `read 파일 [-o 결과.md] [--format md\|text\|json\|chunks]` — 병합 칸·안쪽 표가 있는 표는 HTML 표(rowspan·colspan), 한 칸 겉치레 표는 글로, JSON은 `병합`. HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림은 kordoc으로 저절로. `chunks` = RAG용 구조 청크(kordoc) | 아니오 |
-| 두 문서 글 비교(신구대조) · 공문서 표기 검수 · 개인정보 마스킹 | `diff 원본 새파일` · `lint 파일` · `redact 파일 …` (kordoc 인자 그대로, 차이·위반이 있으면 종료 코드 1) | 아니오 |
+| 두 문서 글 비교(문단·표 칸 단위) | `diff 원본 새파일 [--json] [-o 결과]` — 빈칸을 뺀 글자로 맞대어 띄어쓰기만 다른 곳은 「띄어쓰기만」으로 따로 센다. 표 칸은 「표2 3행 1칸」처럼 주소로. HWP·HWPX를 섞어도 된다. kordoc의 비교는 `kordoc compare` | 아니오 |
+| 공문서 표기 검수 · 개인정보 마스킹 | `lint 파일` · `redact 파일 …` (kordoc 인자 그대로, 위반이 있으면 종료 코드 1) | 아니오 |
 | 그 밖의 kordoc 명령 | `kordoc <명령> …` (generate·patch·seal·tables·crop·profile·levels·validate …) | 아니오 |
 | 문단·표 번호 보기(고칠 때 쓰는 번호) | `outline 파일` | 아니오 |
 | **Markdown → 보고서 모양 한글 문서** | `write 글.md -o 보고서.hwpx\|.hwp [--header 머리말] [--check 폴더] [--no-polish] [--no-check]` | 아니오(.hwp 쓰기는 윈도, 한컴이 있으면 줄 배치 다듬기·쪽 그림 검수) |
@@ -32,6 +33,7 @@ description: "HWP·HWPX(한글 문서)를 읽고·고치고·새로 쓰고·바�
 | 줄 끝 낱말 잘림·벌어진 줄 다듬기 | `write`가 한컴이 있으면 저절로(잘린 문단만 자간·장평을 조금씩 줄임). 끄려면 `--no-polish` | 예 |
 | **고치기·새로 쓰기**(ops) | `edit 파일\|new -o 새파일 --ops ops.json [--op '{...}'] [--engine auto\|com\|direct] [--check 폴더]` | HWPX·새 문서는 아니오 |
 | 형식 바꾸기 | `convert 파일 -o 새파일.hwpx\|.hwp\|.md\|.pdf\|.docx\|.html\|.txt [--engine auto\|com\|direct]` | `.md`·HWPX ↔ HWP는 아니오 |
+| HTML로(쪽 그대로) | `convert 파일 -o 새파일.html` — 기본은 한컴 없이 kordoc render(쪽마다 SVG, 한 파일). 한컴 저장본은 줄 배치 그대로 그린다. hwp-tool이 고정판 kordoc에 덧댐을 넣는다(`kordoc_patch.py`: 쪽 번호 새로 매기기·홀짝 머리말, 머리말 안 쪽 번호, 다단에서 단을 넘는 표, 밑줄 친 빈칸, 단 구분선). `--engine com [--plus] [--single-file]`이면 한컴: 「HTML」이 실패하면 「HTML+」(쪽·단·머리말 위치 그대로), `--plus`는 처음부터 HTML+, `--single-file`은 CSS·그림을 HTML 안에 | 아니오(`--engine com`은 예) |
 | 쪽 그림 / 두 문서 쪽 나란히 비교 | `render 파일 -o 폴더 [--engine auto\|hancom\|kordoc]` / `compare 원본 새파일 -o 폴더` | render는 한컴이 없으면 kordoc 조판, compare는 예 |
 | 한컴으로 다시 열기·HWP↔HWPX 왕복 검사 | `check 파일 [--roundtrip 폴더]` | 예 |
 | 누름틀 보기·채우기, 한컴 JSON 왕복 | `fields`·`fill`·`export-json`·`import-json` | 예 |

@@ -17,9 +17,11 @@ Read, edit, create and convert Korean HWP/HWPX documents — from Claude Code or
 | 줄 끝 낱말 잘림 다듬기 | `write … --polish` | 예 |
 | 내용 읽기 (Markdown, 표 유지 — 병합 칸·안쪽 표는 HTML 표) | `read 파일.hwp` | 아니오 |
 | HWP 3·HWPML·PDF·XLS(X)·DOCX·PPTX·그림(OCR) 읽기, RAG용 청크(`--format chunks`) | `read 파일.pdf` | 아니오 (Node.js 20+, kordoc) |
-| 두 문서 글 비교(신구대조) · 공문서 표기법 검수 · 개인정보 마스킹 | `diff`·`lint`·`redact` | 아니오 (Node.js 20+, kordoc) |
+| 두 문서 글 비교 (문단·표 칸 단위, 띄어쓰기만 다른 곳은 따로 셈) | `diff 원본 새파일` | 아니오 |
+| 공문서 표기법 검수 · 개인정보 마스킹 | `lint`·`redact` | 아니오 (Node.js 20+, kordoc) |
 | 고치기·새로 쓰기 (글자·문단·표·그림·머리말·쪽 번호·각주·누름틀 등) | `edit 파일 -o 새파일 --ops ops.json` | HWPX는 아니오 |
 | HWP ↔ HWPX 변환 | `convert 파일.hwp -o 파일.hwpx` | 아니오 (HWPX → HWP는 윈도) |
+| 쪽 모양 그대로 HTML로 (2단·머리말·쪽 번호 포함) | `convert 파일.hwpx -o 파일.html` | 아니오 (Node.js 20+, kordoc). 한컴 「HTML+」는 `--engine com` |
 | PDF·DOCX 등으로 변환, 쪽 그림, 두 문서 비교 | `convert`·`render`·`compare` | 예 (`render`는 한컴이 없으면 kordoc 조판) |
 | 시험지 조판·점검 | `exam build`·`exam check` | 예 |
 
@@ -64,7 +66,7 @@ python skills/hwp-tool/scripts/hwp_tool.py write examples/sample_report.md -o re
 
 필요: Python 3.10 이상, `lxml`, `olefile`, `pillow`. 윈도에서 HWP 파일을 쓰거나 한컴 경로를 쓰려면 `pywin32`도 필요합니다.
 
-선택: HWP·HWPX 밖의 형식(HWP 3·PDF·오피스·그림)과 `diff`·`lint`·`redact`는 [kordoc](https://github.com/chrisryugj/kordoc)(MIT)을 버전을 고정해 부릅니다. Node.js 20 이상이 있으면 처음 쓸 때 `npx`가 kordoc 4.24.6을 받습니다. 미리 깔아 두려면:
+선택: HWP·HWPX 밖의 형식(HWP 3·PDF·오피스·그림), HTML 변환, `lint`·`redact`는 [kordoc](https://github.com/chrisryugj/kordoc)(MIT)을 버전을 고정해 부릅니다. Node.js 20 이상이 있으면 처음 쓸 때 `npx`가 kordoc 4.24.6을 받습니다. HTML 변환에서 한컴과 다르게 그리던 곳(쪽 번호, 홀짝 머리말, 다단에서 단을 넘는 표, 밑줄 친 빈칸, 단 구분선)은 hwp-tool이 고정판 kordoc에 덧대어 고칩니다(`kordoc_patch.py`, 원본은 `.orig`로 남김). 이 덧댐은 아래처럼 미리 깔아 둔 kordoc에만 들어갑니다:
 
 ```
 npm install --prefix ~/.hwp-tool/kordoc-4.24.6 kordoc@4.24.6
