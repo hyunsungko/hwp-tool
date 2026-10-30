@@ -178,6 +178,14 @@ class Exam(unittest.TestCase):
         self.assertTrue(os.path.getsize(out) > 1000)
 
 
+class BrokenText(unittest.TestCase):
+    def test_lone_surrogate_and_control_char(self):
+        # a damaged style name can hold half of a UTF-16 pair or characters XML does not allow
+        s = hwp5_to_hwpx.fix_surrogates("a\udba0b\x01c\ud83d\ude00")
+        self.assertEqual(s, "a\ufffdb\ufffdc\U0001f600")
+        s.encode("utf-8")
+
+
 class TextDiff(unittest.TestCase):
     def test_spacing_and_table_cells(self):
         import hwp_diff

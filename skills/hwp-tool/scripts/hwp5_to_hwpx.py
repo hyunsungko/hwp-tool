@@ -6,6 +6,7 @@ hwp5_records 코덱으로 레코드를 풀어 OWPML(HWPX) XML로 쓴다. 값 표
 사용: python hwp5_to_hwpx.py 입력.hwp 출력.hwpx (vendor/hwp2hwpx와 다른 우리 것)"""
 import datetime
 import os
+import re
 import struct
 import sys
 import zipfile
@@ -29,6 +30,15 @@ NSDECL = ('xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:hp="http://ww
 XMLHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
 CASE_UNIT = '<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">'
 CASE_PARA = '<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/paragraph">'
+
+
+_XML_BAD = re.compile("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def fix_surrogates(s):
+    """HWP 글은 UTF-16을 반쪽 글자까지 그대로 풀어 둔다(레코드 왕복용). XML로 쓸 때는 짝은 한 글자로 합치고,
+    짝 없는 반쪽과 XML이 받지 않는 글자(깨진 스타일 이름 등, 한컴은 그냥 연다)는 U+FFFD로 바꾼다."""
+    return _XML_BAD.sub("\ufffd", s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace"))
 
 
 def inv(d, prefer=None):
@@ -894,11 +904,11 @@ class Conv:
                     recs = read_records(zlib.decompress(raw, -15) if self.d.compressed else raw)
                 except zlib.error:
                     self.warn("ViewText를 풀지 못해 본문으로 씀")
-            yield self.section(recs)
+            yield fix_surrogates(self.section(recs))
 
     def build(self, out):
         sections = list(self.sections_xml())
-        header = self.header()
+        header = fix_surrogates(self.header())
         z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED)
         z.writestr(zipfile.ZipInfo("mimetype"), "application/hwp+zip", compress_type=zipfile.ZIP_STORED)
         z.writestr("version.xml", XMLHEAD + '<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" '
